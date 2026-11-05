@@ -1,41 +1,55 @@
 # Compatibility
 
-This release targets self-hosted Matrix / Element X Android notifications through an ntfy Android UnifiedPush distributor. It is not a complete port of the upstream Go server. The original web client is bundled as a static application; optional backend features remain disabled.
+The target is the standard ntfy self-hosted server, with upstream v2.37.2 as the current reference. Version 0.2.0 expands the original Matrix-focused implementation. **The complete upstream port is not finished.** This table describes working code, not a claim that every upstream option or API is implemented.
 
-| Area | Support |
+| Area | Status in 0.2.0 |
 | --- | --- |
-| Matrix `GET/POST /_matrix/push/v1/notify` | Gateway discovery, multiple devices, same-origin pushkey validation, rejected invalid keys, persistent per-topic event-ID deduplication |
-| UnifiedPush `GET /topic?up=1` | Version 1 discovery |
-| UnifiedPush POST/PUT | UTF-8 bytes preserved including whitespace and NUL; invalid UTF-8 encoded as base64 with `encoding=base64`; `Content-Encoding: aes128gcm` selects the same payload handling |
-| Publish | POST/PUT topic; POST/PUT root JSON; GET `/topic/publish`, `/send`, `/trigger`; common header/query aliases |
-| Subscribe | NDJSON, SSE, raw, WebSocket; multiple topics; open/keepalive; poll; resume by ID/time/duration; latest; filters; bounded automatic live replay |
-| Message fields | title, priority, tags, click, icon, Markdown, actions, remote attachment URLs |
-| Local attachments | Streamed upload/download, configured base URL, size/quota/expiry limits; authenticated downloads check topic read ACL |
-| Scheduling | Persistent duration/Unix-timestamp delivery; scheduled replay; one-second scheduler resolution |
-| Authentication | Basic with Argon2id password hashes, Bearer tokens stored as SHA-256 hashes, empty Basic username with token password, URL-safe base64 `auth` query parameter |
-| Access control | Static YAML/JSON environment users and wildcard topic rules; admin role; no runtime account database |
-| Web client | Bundled upstream UI, config.js, manifest, static assets, subscriptions and ordinary publishing; optional account/Web Push/payment capabilities disabled |
-| Account info | Read-only `/v1/account` supplies server attachment limits; account mutation/login/token APIs not implemented |
-| Health/metrics | Database health plus authenticated basic Prometheus counters |
+| Publish and subscribe | POST/PUT/root JSON; GET publish/send/trigger; NDJSON, SSE, raw, WebSocket; multiple topics, filters, polling, ID/time replay, live replay |
+| Matrix / UnifiedPush | Discovery, multiple devices, same-origin pushkey validation, persistent event deduplication, UTF-8/binary payload preservation |
+| Notifications | Title, priority, tags, actions, click, icon, Markdown, local/remote attachments |
+| Message sequences | Sequence header/JSON/path; update, delete, clear/read events; replace or cancel a scheduled sequence |
+| Scheduling | Persistent duration or Unix timestamp; scheduler resolution one second |
+| Reverse proxies | `behind-proxy`, `proxy-forwarded-header`, RFC 7239, IPv4/IPv6 and trusted proxy IP/CIDR/host lists |
+| Authentication | Standard bcrypt and existing Argon2 hashes; Basic/Bearer/query auth; standard SQLite `auth-file`; token expiry/revocation; topic ACLs and admin role |
+| Declarative authentication | Upstream `name:hash:role`, `user:topic:permission`, `user:token[:label]`; startup reconciliation; comma-separated environment lists or JSON |
+| Accounts | Signup/login/delete/password, tokens, settings, subscription sync and private sync topics; live streams recheck database credentials/ACLs before subsequent delivery |
+| Administrative CLI | `user` add/list/remove/change-pass/change-role/hash; `access` list/set/reset; `token` add/list/remove/generate |
+| Administrative HTTP | User/password CRUD, grants and tokens for ordinary users; sensitive administrator changes and bulk token disclosure remain local CLI operations |
+| Topic reservations | Ownership and ACL creation/update/removal, list in account info, delete-messages; existing tier reservation limits checked. Tier administration and other tier quotas remain incomplete |
+| iOS upstream | Empty POST with `X-Poll-ID` to the SHA-256 topic URL; optional upstream Bearer token; UnifiedPush/Matrix payloads excluded |
+| Browser Web Push | VAPID key CLI, AES128GCM encryption, upstream-compatible subscription database, topic read ACLs, current permission checks, expiry warnings and invalid endpoint cleanup |
+| Email publishing | SMTP listener, domain/prefix validation, one recipient, token in address or AUTH PLAIN, MIME/plain/HTML decoding, HTTP ACL and rate-limit enforcement |
+| Email notifications | SMTP sender, optional STARTTLS or TLS on port 465, authentication, bounded delivery queue, per-visitor email burst limit, optional verified recipients |
+| Account email/recovery | Email verification/resend/delete/primary address, hashed one-time links, uniform reset-request response, atomic password-reset consumption |
+| Static UI | Upstream web application; login/signup/email/Web Push features advertised when configured |
+| Configuration | YAML, underscore aliases, CLI field overrides and `NTFY_*`; K/M/G byte units; unknown options fail startup |
+| Health/metrics | Database health and authenticated basic Prometheus counters |
 
-## Deliberate differences and unsupported features
+## Databases and migration
 
-- **No Firebase/FCM, Web Push/VAPID, APNs/iOS upstream poll forwarding.** Android must keep ntfy's UnifiedPush distributor running.
-- No SMTP publishing/forwarding, calls/Twilio, Stripe, topic reservations, email verification, password reset, account subscription/settings sync, multi-node clustering, PostgreSQL/S3, message templates, ntfy CLI publish/subscribe commands, or upstream administrative CLI commands.
-- No notification sequence updates/deletes/clears, delayed-message update/cancel, natural-language schedules or timezone parsing. Requests using unsupported publication options return an error instead of reporting successful execution.
-- Error bodies follow ntfy's `code/http/error` envelope; exact upstream numeric error codes are not exhaustively reproduced. Unknown routes return 404.
-- Unknown YAML keys fail startup. The environment accepts the fields in `src/config.rs` as `NTFY_<UPPER_SNAKE_CASE>`; complex arrays are JSON. Upstream's colon-separated auth-users syntax and bcrypt hashes are not accepted.
-- SQLite files are **not** compatible with the Go version. Startup refuses an existing foreign database. Start with a new named volume, preserve the old volume for rollback, and transfer credentials through the new config format. Existing client subscriptions can keep their URLs if the hostname and topic ACLs remain the same; old cached messages are not migrated.
-- Matrix gateway accepts only pushkeys under the configured base origin and valid single topic paths. It never performs outgoing requests to pushkey URLs. Unknown topics are valid ntfy topics and are not treated as expired devices. Device liveness/410 abandonment tracking is not implemented.
-- Matrix request bodies are bounded by `message-size-limit` (default 4096 bytes), matching the common upstream default. Per-topic event-ID deduplication lasts while the corresponding cached message is retained; count-only updates are not deduplicated.
-- Matrix multi-device requests may be partially delivered if a later device encounters a transient error; homeserver retries are safe for event notifications because successful device deliveries are deduplicated. Do not interpret transient HTTP errors as permanent pushkey rejection.
-- The Compose default grants `up*` anonymous read/write access by unguessable URL. For authenticated readers, retain anonymous write-only access for homeservers and grant read access to a configured phone user.
-- No built-in TLS listener. HTTPS and reverse proxy configuration belong to your deployment environment. The image has no preset public domain; configure `base-url` at runtime as an origin, not a URL path prefix. Forwarded IP headers are not trusted by this release.
-- Raw streams flatten line breaks, as the upstream protocol does. SSE message events have `data:` without a named `event: message`, preserving EventSource.onmessage behavior.
-- Retention is bounded by age and count. Polling is paginated and indicates truncation in a response header. Live subscriptions page internally before switching to live events; under sustained pressure the client may need multiple reconnects to catch up.
+- **Authentication:** standard schema version 11 is used directly. Versions 1–10 migrate transactionally in upstream order. Passwords, users, grants, tokens, account preferences and other existing tables are preserved. Declarative entries are subsequently reconciled with configuration, as upstream does; keep their declarations when migrating.
+- **Web Push:** standard SQLite schema version 1 is supported directly.
+- **Message cache:** recognized Go schemas 1–17 are imported one row at a time into the Rust cursor/JSON schema. IDs, order, event/sequence fields, attachment metadata/deleted state, schedules and expiration are retained. Existing attachment files must remain in the configured attachment directory. Go sender/user usage metadata is not currently used by the Rust cache.
+- A migration creates a WAL-aware, mode-0600 snapshot beside the database, e.g. `auth.db.pre-rust-v1.bak` or `cache.db.pre-rust-go-v17.bak`. The backup name becomes visible only after the snapshot is complete. Existing backups are never overwritten. Unknown databases and unsupported cache versions fail without rewriting their tables.
+- Stop the prior process before starting another implementation against its files. A converted message cache is not readable by Go: use its backup when rolling back. Do not treat the automatic backup as a substitute for your own retained backup.
+- The Docker process runs as UID/GID `10001`. Mounted configuration and data must have the corresponding read/write permissions.
 
-## Validation scope
+## Remaining work and differences
 
-`cargo test` exercises real protocol behavior, including a TCP WebSocket connection, restart persistence, Matrix retry deduplication, multi-device delivery, hostile pushkeys, private ACLs, binary payloads, attachment quotas, slow consumers, replay boundaries and delayed delivery. `scripts/smoke.py` verifies a running Docker container using HTTP.
+- Firebase/FCM service-account delivery, Twilio calls, Stripe/billing, tier management/enforcement, PostgreSQL, S3 and multi-node clustering are not implemented.
+- Full per-account/day usage accounting and per-visitor attachment bandwidth/storage quotas are not implemented. `/v1/account` currently provides configured global attachment limits, reservation counts and zero usage counters for messages/emails/calls. Existing tier metadata is preserved; do not rely on this release to enforce purchased-plan quotas.
+- Go/Sprig templates, natural-language/timezone schedules, ntfy client CLI publish/subscribe, built-in HTTPS/Unix/admin listeners and all upstream config knobs are not implemented. Unsupported publication options fail instead of claiming execution. `web-root` still names the static asset directory in this Rust implementation, not upstream's virtual web-app prefix.
+- Error envelopes use `code/http/error`, but exact upstream numeric error codes are not exhaustively matched. Third-party clients relying on particular numeric codes need additional compatibility testing.
+- Authentication is queried on a bounded SQLite worker; bcrypt/Argon2 work has bounded blocking concurrency. There is no upstream access-cache setting yet. Legacy Rust static users, token hashes and object ACL syntax remain available without `auth-file`; standard database-managed deployments should use bcrypt and normal ntfy tokens.
+- Reverse-proxy trust is opt-in. The last forwarded-header field is used, scanning from right to left and removing configured trusted hops. Malformed addresses fall back to the TCP peer. Hostnames in `proxy-trusted-hosts` resolve at startup.
+- Upstream, Web Push and SMTP have bounded queues and timeouts. External provider failure is logged after local acceptance; it does not undo a committed notification. This is not an exactly-once external delivery system. Scheduled messages are not accepted with email forwarding.
+- Web Push endpoints are restricted to recognized HTTPS push-service hosts; redirects are disabled. Transient failures preserve subscriptions; 404/410 remove them. Provider acceptance, APNs delivery and device power-management behavior are not proven by local tests.
+- Matrix gateway pushkeys must be same-origin single-topic URLs under the runtime base URL. No outgoing request is made to a pushkey. Request size defaults to 4096 bytes. Device liveness/410 expiration tracking is not implemented. Successful event deliveries are deduplicated across homeserver retries; count-only notifications are not.
+- Cache is bounded by age and message count. Poll replies are bounded to one page and indicate truncation; streaming replay pages internally. Slow consumers disconnect and can resume from the durable cache. `Cache: no` messages cannot be recovered after disconnect.
+- Standard `listen-http: ":80"` is accepted; the container default is port 8080. `base-url` is an HTTP(S) origin configured at runtime, required for Matrix, attachment links, iOS upstream and verification/reset links. No deployment domain or reverse proxy is built into the image.
 
-Tests emulate the homeserver and distributor protocol. They do not prove delivery on a particular physical phone, Android power-management setup, or public TLS deployment. Finish deployment by running Element X's notification diagnostics on the actual device.
+## Validation
+
+Rust integration tests cover persistent auth/ACL migration, declarative reconciliation, account/token isolation and revocation, administrative restrictions, live-stream revocation, cache migration/restart, sequence replacement/cancellation, proxy IP isolation, Web Push cryptographic round trips/registration, SMTP ingress/forwarding and one-time email/reset links, in addition to the original Matrix, attachment, replay and WebSocket tests.
+
+External delivery tests use local mock services. They do not send production notifications or deploy a public service. `scripts/smoke.py` validates a running container. Historical benchmark data in `docs/performance.md` describes version 0.1 and must not be treated as a benchmark of newly enabled features.

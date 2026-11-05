@@ -1,8 +1,8 @@
-# ntfy-rs · Matrix / Element X Android 推送网关
+# ntfy-rs · Rust ntfy 服务端
 
-用 Rust 重写的 ntfy 自托管服务端，重点服务 **Matrix → UnifiedPush → ntfy Android → Element X Android**。采用 Tokio + Axum、SQLite WAL、共享广播消息和有界队列。Docker 镜像同时支持 `linux/amd64` 与 `linux/arm64`，运行时不包含 Go、Node.js 或 Rust 编译器。
+以标准 ntfy 自托管功能为兼容目标的 Rust 服务端，采用 Tokio + Axum、SQLite WAL、共享广播消息和有界队列。保留上游 Web 应用，同时支持 Matrix / Element X Android 的 UnifiedPush 网关。镜像支持 `linux/amd64`、`linux/arm64`，运行时不包含 Go、Node.js 或 Rust 编译器。
 
-这是独立实现，**不是上游全部功能的等价替换**。保留上游 Web 应用，支持常规发布订阅、附件和定时消息；未实现 Firebase/FCM、iOS/APNs 上游唤醒、Web Push、邮件、计费、集群和账号管理 API。配置格式及数据库格式也不同，详见 [兼容范围](docs/compatibility.md)。
+0.2.0 增加反向代理客户端 IP、原版 `auth-file`、bcrypt 用户与 Token、账号登录/注册/同步、Web Push、SMTP 邮件入口与转发、邮箱验证/密码重置、iOS 上游唤醒和消息序列操作。**完整上游功能重构仍在进行中**：Firebase、付费套餐与配额、Twilio、Stripe、模板、集群等尚未实现，不能宣称已与上游完全等价。已实现功能、数据库迁移及具体限制见 [兼容范围](docs/compatibility.md)。
 
 ## 本地构建与推送
 
@@ -45,39 +45,71 @@ python3 scripts/smoke.py http://127.0.0.1:8080 "$NTFY_BASE_URL"
 
 不需要手工创建 `up*` 主题，也通常不需要改 Synapse 的服务器配置；客户端通过 Matrix pusher 注册自己的端点。具体客户端版本的菜单名称可能不同。参考 [UnifiedPush 排查指南](https://unifiedpush.org/users/troubleshooting/setup/) 和 [Element 官方说明](https://docs.element.io/latest/element-support/element-androidios-client-settings/using-unified-push-and-ntfy-for-push-notifications/)。
 
-本仓库的默认 Compose 仅对 `up*` 主题开放匿名读写，其他主题禁止访问。随机的 `up*` 地址相当于访问凭据，不应公开。需要限制读取时，使用下面的私有配置。
+默认访问权限与 ntfy 的默认值一致，为匿名 read-write；主题地址需要保密。可通过 `auth-default-access`、CLI 或声明式 ACL 限制权限。
+
+## 账号与原版配置
+
+支持以下配置项，无需删除 `behind-proxy` 等字段绕过启动错误：
+
+```yaml
+listen-http: ":80"
+behind-proxy: true
+cache-file: "/var/lib/ntfy/cache.db"
+cache-duration: "72h"
+auth-file: "/var/lib/ntfy/auth.db"
+auth-default-access: "read-write"
+enable-login: true
+enable-signup: false
+# iOS 唤醒按需启用；必须同时通过 YAML 或 NTFY_BASE_URL 提供实际 base-url。
+# upstream-base-url: "https://ntfy.sh"
+log-level: "info"
+```
+
+只读挂载到 `/etc/ntfy/server.yml`。优先级为 CLI 参数 > `NTFY_*` 环境变量 > YAML；不要让 Compose 中的旧环境变量覆盖你需要的配置。`base-url` 在部署时设置，镜像没有预设域名。`behind-proxy: true` 使用转发头最右端的客户端地址；多层代理可设置 `proxy-trusted-hosts`，支持 IP、CIDR 和启动时解析的主机名。
+
+可在运行中的容器内管理账号，数据库修改对后续请求立即生效：
+
+```sh
+docker compose exec ntfy ntfy user add --role=admin admin
+docker compose exec ntfy ntfy user add phone
+docker compose exec ntfy ntfy access phone 'up*' read-write
+docker compose exec ntfy ntfy token add --label=phone phone
+docker compose exec ntfy ntfy user list
+```
+
+密码由交互输入；自动化可使用 `NTFY_PASSWORD` 或 `NTFY_PASSWORD_HASH`。原版声明式配置也可使用：
+
+```yaml
+auth-users:
+  - 'phone:$2b$10$...由 ntfy user hash 生成的完整 bcrypt 哈希...:user'
+auth-access:
+  - 'everyone:up*:write-only'
+  - 'phone:up*:read-write'
+auth-tokens:
+  - 'phone:tk_...由 ntfy token generate 生成的完整 Token...:phone'
+```
+
+声明式用户、ACL、Token 在启动时按配置协调，不能通过账号 API 修改；从配置移除后会从数据库删除。CLI 创建的普通用户不会因此删除。旧版 Rust 的对象式 `auth-users` / `auth-access` 和无数据库的 Argon2/SHA-256 鉴权仍可使用。
+
+Matrix homeserver 通常需要匿名写入 `up*`，手机用户可以使用私有读权限。不能在不提供写入凭据的情况下把所有 Matrix 推送主题设为匿名 deny-all。
+
+原版 `auth.db` 的用户、bcrypt 密码、ACL 和 Token 可直接读取，旧 schema 自动备份并迁移。原版消息缓存 schema 1–17 会先备份，再逐条转为 Rust 缓存格式；回退 Go 时使用迁移前备份。首次切换前停止使用同一数据库的旧进程；容器 UID/GID 为 `10001`，数据目录须可读写。
+
+## 浏览器、iOS 与邮件
+
+- iOS：配置 `upstream-base-url` 和运行时 `base-url`，向上游仅发送消息 ID 和哈希主题，不转发通知正文。
+- Web Push：用 `ntfy webpush keys` 生成密钥，配置 `web-push-public-key`、`web-push-private-key`、`web-push-file`、`web-push-email-address` 和 `base-url`。浏览器端点保存在兼容原版的 SQLite 数据库中。
+- 邮件转发：配置 `smtp-sender-addr`、`smtp-sender-from`，按需设置用户名/密码。发布时可使用 `Email` 头；`smtp-sender-verify: true` 仅允许发送到当前账号已验证的地址。
+- 邮件发布：配置 `smtp-server-listen`、`smtp-server-domain`，可选 `smtp-server-addr-prefix`。支持 `topic+token@domain` 和 SMTP AUTH PLAIN，仍执行主题 ACL。
+- 账号邮箱验证、主邮箱设置和一次性密码重置链接需要 SMTP sender、`auth-file` 和运行时 `base-url`。
 
 ## 私有订阅与鉴权
 
-Matrix homeserver 必须能匿名写入推送主题，因此不能简单地要求所有请求登录。推荐匿名 `up*` **write-only**，手机用户 `up*` **read-write**。
-
-通过标准输入生成密码哈希，避免把明文密码写进配置或命令参数：
-
-```sh
-read -rs NTFY_PASSWORD
-printf '%s' "$NTFY_PASSWORD" | docker run --rm -i utoptop/ntfy:main hash-password
-unset NTFY_PASSWORD
-```
-
-将输出写入 `server.local.yml`（该文件已被 Git 忽略）：
-
-```yaml
-auth-default-access: deny-all
-auth-users:
-  - name: phone
-    password-hash: '$argon2id$...实际生成的哈希...'
-auth-access:
-  - { user: '*', topic: 'up*', permission: write-only }
-  - { user: phone, topic: 'up*', permission: read-write }
-```
-
-把该文件只读挂载至 `/etc/ntfy/server.yml`，并**删除 Compose 中的 `NTFY_AUTH_ACCESS` 环境变量**，否则它会覆盖 YAML。在手机 ntfy 中配置 `phone` 的用户名/密码。也支持 Bearer token：将随机 token 的 SHA-256 小写十六进制哈希写入用户的 `token-hashes` 数组；可通过 `ntfy token-hash` 从 stdin 生成。token 应使用至少 32 字节的安全随机值。
-
-ACL 中具体用户优先于 `*`，同类规则中更具体的主题模式优先；支持 `*` 通配符。配置修改后重启容器。Web 端可配置订阅凭据，但账号注册、会话登录和账号同步没有启用。
+设置 `auth-default-access: deny-all` 后，可用 CLI 或上述声明式配置逐个授权。ACL 中用户规则优先于 everyone，同类规则更长的匹配优先。支持 Basic、Bearer token、空 Basic 用户名的 Token 和 `auth` 查询参数。撤销 Token 或调整 ACL 后，现有流在下一次投递或保活前复查权限并关闭失效连接。
 
 ## API 示例
 
-部署示例仅开放 `up*`，以下主题因此可直接测试：
+以下使用示例主题，请按实际 ACL 授权：
 
 ```sh
 # 实时 NDJSON / SSE / WebSocket 订阅
@@ -114,11 +146,11 @@ Dockerfile 使用锁定的 Cargo/npm 依赖，Web 应用在构建阶段编译，
 - 历史留在磁盘。实时订阅自动按页恢复离线消息，默认每页最多 1,000 条 / 1 MiB，同时最多 8 个历史回放。一次 `poll=1` 返回一页，若有更多消息会带 `X-Messages-Truncated: 1`，可从最后一条消息 ID 继续。
 - 慢订阅者超过环形缓冲后断开，重连时可从最后消息 ID 补发。`Cache: no` 消息不具备离线恢复能力。
 - 历史保留时间及总条数都有上限；达到容量时淘汰最旧的已投递消息。**不能把有限缓存当作永久消息队列**。
-- 附件采用流式上传下载，限制单文件与总磁盘占用，过期文件每分钟清理。需要新数据库，禁止直接挂载上游的 cache.db/auth.db。
+- 附件采用流式上传下载，限制单文件与总磁盘占用，过期文件每分钟清理。支持标准 SQLite auth.db；Go cache.db 会自动备份并转换，详见兼容范围。
 - `GET /v1/health` 检查数据库；`GET /metrics` 提供基础 Prometheus 指标，要求具有 `admin: true` 的用户凭据。
-- 默认不信任 `X-Forwarded-For`，反向代理后的客户端共享代理 IP 限额。Matrix 网关不使用普通发布的 IP 速率限额，但仍受并发/队列/请求大小限制；请按实际部署在代理侧设置合适的限制。
+- 默认不信任转发头；反向代理部署可配置 `behind-proxy` 和 `proxy-trusted-hosts`。Matrix 网关不使用普通发布的 IP 速率限额，但仍受并发/队列/请求大小限制；请按实际部署在代理侧设置合适的限制。
 
-本机 arm64 对照测试（1,000 个订阅、32 并发、每轮 30,000 次 Matrix 推送、三轮中位数）：Rust 约 **5,257 次/秒**，上游 Go 2.37.2 约 **2,467 次/秒**；负载后的进程 RSS 为 **34.46 MiB / 128.95 MiB**。两版均使用 SQLite FULL + WAL 和 Docker volume，所有投递数量吻合、HTTP 错误为零。这是特定短时负载的结果，不代表持续生产容量或所有功能的性能；原始数据与限制见 [性能报告](docs/performance.md)。
+历史版本 0.1 的本机 arm64 对照测试（1,000 个订阅、32 并发、每轮 30,000 次 Matrix 推送、三轮中位数）：Rust 约 **5,257 次/秒**，上游 Go 2.37.2 约 **2,467 次/秒**；负载后的进程 RSS 为 **34.46 MiB / 128.95 MiB**。两版均使用 SQLite FULL + WAL 和 Docker volume，所有投递数量吻合、HTTP 错误为零。这组旧版数据不用于证明 0.2 新增功能的性能，也不代表持续生产容量；原始数据与限制见 [性能报告](docs/performance.md)。
 
 ## 来源与许可
 

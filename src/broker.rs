@@ -1,7 +1,10 @@
 use crate::{
+    auth::Auth,
     config::Config,
     error::{Error, Result},
     model::Envelope,
+    upstream::Upstream,
+    webpush::WebPush,
 };
 use axum::http::StatusCode;
 use futures_util::stream::SelectAll;
@@ -21,6 +24,8 @@ pub struct Broker {
     topics: RwLock<HashMap<String, broadcast::Sender<Arc<Envelope>>>>,
     slots: Arc<Semaphore>,
     config: Arc<Config>,
+    upstream: Option<Upstream>,
+    pub(crate) webpush: Option<Arc<WebPush>>,
     pub published: AtomicU64,
     pub lagged: AtomicU64,
 }
@@ -43,14 +48,18 @@ impl Drop for Subscription {
     }
 }
 impl Broker {
-    pub fn new(config: Arc<Config>) -> Arc<Self> {
-        Arc::new(Self {
+    pub fn new(config: Arc<Config>, auth: Arc<Auth>) -> Result<Arc<Self>> {
+        let upstream = Upstream::new(&config)?;
+        let webpush = WebPush::new(config.clone(), auth)?;
+        Ok(Arc::new(Self {
+            upstream,
+            webpush,
             topics: RwLock::new(HashMap::new()),
             slots: Arc::new(Semaphore::new(config.subscription_limit)),
             config,
             published: AtomicU64::new(0),
             lagged: AtomicU64::new(0),
-        })
+        }))
     }
     pub fn subscribe(
         self: &Arc<Self>,
@@ -92,6 +101,12 @@ impl Broker {
     }
     pub fn publish(&self, message: Arc<Envelope>) {
         self.published.fetch_add(1, Ordering::Relaxed);
+        if let Some(push) = &self.webpush {
+            push.publish(message.clone());
+        }
+        if let Some(upstream) = &self.upstream {
+            upstream.publish(message.clone());
+        }
         if let Some(sender) = self.topics.read().unwrap().get(&message.message.topic) {
             let _ = sender.send(message);
         }
@@ -112,6 +127,7 @@ struct Bucket {
     updated: Instant,
 }
 pub struct Visitor {
+    pub ip: IpAddr,
     bucket: Mutex<Bucket>,
     slots: Arc<Semaphore>,
 }
@@ -141,6 +157,7 @@ impl Visitors {
             }
         }
         let v = Arc::new(Visitor {
+            ip,
             bucket: Mutex::new(Bucket {
                 tokens: self.config.visitor_request_limit_burst as f64,
                 updated: Instant::now(),

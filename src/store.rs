@@ -59,26 +59,14 @@ impl Store {
         {
             std::fs::create_dir_all(parent)?;
         }
-        let connection = Connection::open(&config.cache_file)?;
-        let app_id: i64 = connection.query_row("PRAGMA application_id", [], |r| r.get(0))?;
-        let tables: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
-            [],
-            |r| r.get(0),
-        )?;
-        if tables > 0 && app_id != 0x4e545253 {
-            return Err(Error::bad(
-                "cache database is not an ntfy-rs database; use a new cache-file",
-            ));
-        }
-        connection.execute_batch("PRAGMA application_id=1314148947; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=16777216;
-          CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, topic TEXT NOT NULL, time INTEGER NOT NULL, expires INTEGER NOT NULL, scheduled INTEGER NOT NULL, data TEXT NOT NULL);
-          CREATE INDEX IF NOT EXISTS messages_topic_seq ON messages(topic,seq);
-          CREATE INDEX IF NOT EXISTS messages_expiry ON messages(expires);
-          CREATE INDEX IF NOT EXISTS messages_due ON messages(scheduled,time);
-          CREATE TABLE IF NOT EXISTS dedup(key TEXT PRIMARY KEY, message_id TEXT NOT NULL, expires INTEGER NOT NULL);
-          CREATE INDEX IF NOT EXISTS dedup_expiry ON dedup(expires);
-          PRAGMA user_version=1;")?;
+        let mut connection = if config.cache_file.as_os_str().is_empty() {
+            Connection::open_in_memory()?
+        } else {
+            Connection::open(&config.cache_file)?
+        };
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        crate::cache_migration::initialize(&mut connection, &config)?;
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA journal_size_limit=16777216;")?;
         let seq = connection.query_row("SELECT COALESCE(MAX(seq),0) FROM messages", [], |r| {
             r.get(0)
         })?;
@@ -240,10 +228,20 @@ impl Store {
     }
     pub async fn attachment_ids(&self) -> Result<HashSet<String>> {
         self.run(|db| {
-            let mut stmt = db.connection.prepare("SELECT id FROM messages WHERE expires>?1 AND json_extract(data,'$.attachment.expires')>?1")?;
+            let mut stmt = db.connection.prepare("SELECT id FROM messages WHERE expires>?1 AND json_extract(data,'$.attachment.expires')>?1 AND COALESCE(json_extract(data,'$.attachment.deleted'),0)=0")?;
             let rows = stmt.query_map([now()], |r| r.get::<_, String>(0))?;
             Ok(rows.collect::<std::result::Result<HashSet<_>, _>>()?)
         }).await
+    }
+    pub async fn expire_topic(&self, topic: String) -> Result<()> {
+        self.run(move |db| {
+            db.connection.execute(
+                "UPDATE messages SET expires=?1 WHERE topic=?2",
+                params![now(), topic],
+            )?;
+            Ok(())
+        })
+        .await
     }
     pub async fn health(&self) -> Result<()> {
         self.run(|db| {
@@ -286,6 +284,13 @@ impl Database {
                 let scheduled = message.time > now();
                 let envelope = Arc::new(Envelope::new(self.seq, *cache, *message.clone()));
                 if *cache {
+                    if !message.sequence_id.is_empty()
+                        && matches!(message.event.as_str(), "message" | "message_delete")
+                    {
+                        let removed = tx.execute("DELETE FROM messages WHERE topic=?1 AND scheduled=1 AND (json_extract(data,'$.sequence_id')=?2 OR id=?2)", params![message.topic,message.sequence_id])?;
+                        self.count -= removed;
+                        evicted |= removed > 0;
+                    }
                     if self.count >= self.config.cache_max_messages {
                         let deleted = tx.execute("DELETE FROM messages WHERE seq IN (SELECT seq FROM messages WHERE scheduled=0 ORDER BY seq LIMIT ?1)", [self.config.cache_max_messages.clamp(1, 256) as i64])?;
                         self.count -= deleted;

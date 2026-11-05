@@ -3,6 +3,32 @@ use std::io::Read;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|s| s == "webpush") && args.get(1).is_some_and(|s| s == "keys") {
+        let (private, public) = ntfy_rs::webpush::keys();
+        let content = format!("web-push-public-key: {public}\nweb-push-private-key: {private}\n");
+        if args.len() == 2 {
+            print!("{content}");
+        } else if args.len() == 4 && matches!(args[2].as_str(), "--output-file" | "-f") {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            use std::io::Write;
+            options.open(&args[3])?.write_all(content.as_bytes())?;
+        } else {
+            return Err("usage: ntfy webpush keys [--output-file FILE]".into());
+        }
+        return Ok(());
+    }
+    if matches!(
+        args.first().map(String::as_str),
+        Some("user" | "access" | "token")
+    ) {
+        return ntfy_rs::admin::run(&args);
+    }
     match args.first().map(String::as_str).unwrap_or("serve") {
         "--version" | "version" => {
             println!("ntfy-rs {}", env!("CARGO_PKG_VERSION"));
@@ -10,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "--help" | "help" | "-h" => {
             println!(
-                "ntfy-rs {}\n\nUsage:\n  ntfy serve [--config /etc/ntfy/server.yml]\n  ntfy hash-password   # read password from stdin, write Argon2id hash\n  ntfy token-hash      # read access token from stdin, write SHA-256 hash\n  ntfy healthcheck\n\nConfiguration: YAML plus NTFY_* environment overrides. See README.md.",
+                "ntfy-rs {}\n\nUsage:\n  ntfy serve [--config /etc/ntfy/server.yml]\n  ntfy user add [--role=admin] USERNAME\n  ntfy user list / change-pass / change-role / remove\n  ntfy access [USER [TOPIC [PERMISSION]]]\n  ntfy token add / list / remove / generate\n  ntfy webpush keys [--output-file FILE]\n  ntfy hash-password   # read password from stdin, write Argon2id hash\n  ntfy token-hash      # read access token from stdin, write SHA-256 hash\n  ntfy healthcheck\n\nConfiguration: YAML, NTFY_* environment variables, then --field=value CLI overrides. See README.md.",
                 env!("CARGO_PKG_VERSION")
             );
             return Ok(());
@@ -42,18 +68,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "serve" | "healthcheck" => {}
         _ => return Err("unknown command; run ntfy --help".into()),
     }
-    let mut path = None;
+    let mut path = None::<String>;
+    let mut overrides = std::collections::HashMap::new();
+    let known = serde_json::to_value(Config::default())?;
     let mut i = 1;
     while i < args.len() {
-        match args[i].as_str() {
-            "--config" | "-c" if i + 1 < args.len() => {
-                path = Some(args[i + 1].as_str());
-                i += 2;
-            }
-            _ => return Err(format!("unknown option: {}", args[i]).into()),
+        let (raw, inline) = args[i]
+            .split_once('=')
+            .map(|(k, v)| (k, Some(v.to_owned())))
+            .unwrap_or((&args[i], None));
+        let key = match raw {
+            "-c" => "config",
+            "-l" => "listen-http",
+            "-B" => "base-url",
+            "-P" => "behind-proxy",
+            _ => raw.trim_start_matches('-'),
         }
+        .replace('_', "-");
+        if key != "config" && known.get(&key).is_none() {
+            return Err(format!("unknown option: {raw}").into());
+        }
+        let boolean = known.get(&key).is_some_and(serde_json::Value::is_boolean);
+        let value = if let Some(value) = inline {
+            value
+        } else if boolean && args.get(i + 1).is_none_or(|v| v.starts_with('-')) {
+            "true".into()
+        } else {
+            i += 1;
+            args.get(i).cloned().ok_or("option requires a value")?
+        };
+        if key == "config" {
+            path = Some(value);
+        } else {
+            overrides.insert(key, value);
+        }
+        i += 1;
     }
-    let config = Config::load(path)?;
+    let config = Config::load_with_overrides(path.as_deref(), &overrides)?;
     if args.first().is_some_and(|s| s == "healthcheck") {
         use std::io::{BufRead, Write};
         let mut address = config.address()?;
@@ -89,6 +140,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let address = config.address()?;
         let app = App::new(config)?;
         let maintenance = app.start_maintenance();
+        let smtp = if !app.config.smtp_server_listen.is_empty() {
+            let listener = tokio::net::TcpListener::bind(ntfy_rs::smtp::address(
+                &app.config.smtp_server_listen,
+            )?)
+            .await?;
+            Some(ntfy_rs::smtp::serve(app.clone(), listener))
+        } else {
+            None
+        };
         let listener = tokio::net::TcpListener::bind(address).await?;
         tracing::info!(%address, version=env!("CARGO_PKG_VERSION"), "ntfy-rs listening");
         let shutdown = app.shutdown.clone();
@@ -123,6 +183,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let _ = maintenance.await;
+        if let Some(smtp) = smtp {
+            let _ = smtp.await;
+        }
         Ok::<(), Box<dyn std::error::Error>>(())
     })
 }

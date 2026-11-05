@@ -1,4 +1,5 @@
 use crate::{
+    account,
     auth::{Auth, Identity, token_hash},
     broker::{Broker, Visitor, Visitors},
     config::Config,
@@ -43,16 +44,20 @@ pub struct App {
     pub config: Arc<Config>,
     pub store: Store,
     pub broker: Arc<Broker>,
-    auth: Auth,
+    pub(crate) auth: Arc<Auth>,
+    pub(crate) mailer: Option<crate::smtp::Sender>,
     visitors: Visitors,
     requests: Arc<Semaphore>,
     replays: Arc<Semaphore>,
-    attachment_bytes: Arc<AtomicU64>,
+    pub(crate) attachment_bytes: Arc<AtomicU64>,
     pub shutdown: CancellationToken,
 }
 
 impl App {
-    pub fn new(config: Config) -> Result<Arc<Self>> {
+    pub fn new(mut config: Config) -> Result<Arc<Self>> {
+        config
+            .resolve_proxy_hosts()
+            .map_err(|e| Error::bad(e.to_string()))?;
         config.validate().map_err(|e| Error::bad(e.to_string()))?;
         std::fs::create_dir_all(&config.attachment_cache_dir)?;
         let used = std::fs::read_dir(&config.attachment_cache_dir)?
@@ -62,10 +67,12 @@ impl App {
             .map(|m| m.len())
             .sum();
         let config = Arc::new(config);
-        let broker = Broker::new(config.clone());
+        let auth = Arc::new(Auth::new(config.clone())?);
+        let broker = Broker::new(config.clone(), auth.clone())?;
         let store = Store::open(config.clone(), broker.clone())?;
         Ok(Arc::new(Self {
-            auth: Auth::new(config.clone()),
+            mailer: crate::smtp::Sender::new(config.clone())?,
+            auth,
             visitors: Visitors::new(config.clone()),
             requests: Arc::new(Semaphore::new(config.request_limit)),
             replays: Arc::new(Semaphore::new(8)),
@@ -80,12 +87,103 @@ impl App {
         Router::new()
             .route("/", get(root).post(publish_json).put(publish_json))
             .route("/v1/health", get(health))
+            .route(
+                "/v1/users",
+                get(crate::admin_api::handle)
+                    .post(crate::admin_api::handle)
+                    .put(crate::admin_api::handle)
+                    .delete(crate::admin_api::handle),
+            )
+            .route(
+                "/v1/users/access",
+                axum::routing::post(crate::admin_api::handle)
+                    .put(crate::admin_api::handle)
+                    .delete(crate::admin_api::handle),
+            )
+            .route(
+                "/v1/users/tokens",
+                get(crate::admin_api::handle)
+                    .post(crate::admin_api::handle)
+                    .delete(crate::admin_api::handle),
+            )
+            .route(
+                "/v1/users/password/reset",
+                axum::routing::post(crate::admin_api::handle),
+            )
+            .route(
+                "/v1/webpush",
+                axum::routing::post(crate::webpush::registration)
+                    .delete(crate::webpush::registration),
+            )
             .route("/v1/config", get(web_config))
-            .route("/v1/account", get(account_limits))
+            .route(
+                "/v1/account",
+                get(account::get)
+                    .post(account::create)
+                    .delete(account::delete),
+            )
+            .route("/v1/account/login", axum::routing::post(account::login))
+            .route(
+                "/v1/account/email",
+                axum::routing::put(account::email).delete(account::email),
+            )
+            .route(
+                "/v1/account/email/primary",
+                axum::routing::post(account::email),
+            )
+            .route(
+                "/v1/account/email/resend",
+                axum::routing::post(account::email),
+            )
+            .route(
+                "/v1/account/email/verify",
+                axum::routing::post(account::email_verify),
+            )
+            .route(
+                "/v1/account/password/reset/request",
+                axum::routing::post(account::password_reset_request),
+            )
+            .route(
+                "/v1/account/password/reset",
+                axum::routing::post(account::password_reset),
+            )
+            .route("/account/email/verify/{token}", get(root))
+            .route("/account/password/reset/{token}", get(root))
+            .route(
+                "/v1/account/password",
+                axum::routing::post(account::password),
+            )
+            .route(
+                "/v1/account/token",
+                axum::routing::post(account::token)
+                    .patch(account::token)
+                    .delete(account::token),
+            )
+            .route(
+                "/v1/account/settings",
+                axum::routing::patch(account::settings),
+            )
+            .route(
+                "/v1/account/subscription",
+                axum::routing::post(account::subscription)
+                    .patch(account::subscription)
+                    .delete(account::subscription),
+            )
+            .route(
+                "/v1/account/reservation",
+                axum::routing::post(account::reservation_add),
+            )
+            .route(
+                "/v1/account/reservation/{topic}",
+                axum::routing::delete(account::reservation_delete),
+            )
             .route("/config.js", get(config_js))
             .route("/manifest.webmanifest", get(manifest))
             .route("/app", get(root))
             .route("/settings", get(root))
+            .route("/login", get(root))
+            .route("/signup", get(root))
+            .route("/account", get(root))
             .route("/metrics", get(metrics))
             .route(
                 "/_matrix/push/v1/notify",
@@ -96,11 +194,56 @@ impl App {
                 "/{topic}",
                 get(topic_get).post(publish_topic).put(publish_topic),
             )
-            .route("/{topic}/json", get(subscribe_json))
-            .route("/{topic}/sse", get(subscribe_sse))
-            .route("/{topic}/raw", get(subscribe_raw))
-            .route("/{topic}/ws", get(subscribe_ws))
-            .route("/{topic}/auth", get(topic_auth))
+            .route(
+                "/{topic}/{sequence}",
+                axum::routing::post(publish_sequence)
+                    .put(publish_sequence)
+                    .delete(sequence_event),
+            )
+            .route("/{topic}/{sequence}/delete", get(sequence_event))
+            .route(
+                "/{topic}/{sequence}/clear",
+                get(sequence_event).put(sequence_event),
+            )
+            .route(
+                "/{topic}/{sequence}/read",
+                get(sequence_event).put(sequence_event),
+            )
+            .route(
+                "/{topic}/json",
+                get(subscribe_json)
+                    .post(publish_sequence)
+                    .put(publish_sequence)
+                    .delete(sequence_event),
+            )
+            .route(
+                "/{topic}/sse",
+                get(subscribe_sse)
+                    .post(publish_sequence)
+                    .put(publish_sequence)
+                    .delete(sequence_event),
+            )
+            .route(
+                "/{topic}/raw",
+                get(subscribe_raw)
+                    .post(publish_sequence)
+                    .put(publish_sequence)
+                    .delete(sequence_event),
+            )
+            .route(
+                "/{topic}/ws",
+                get(subscribe_ws)
+                    .post(publish_sequence)
+                    .put(publish_sequence)
+                    .delete(sequence_event),
+            )
+            .route(
+                "/{topic}/auth",
+                get(topic_auth)
+                    .post(publish_sequence)
+                    .put(publish_sequence)
+                    .delete(sequence_event),
+            )
             .route(
                 "/{topic}/publish",
                 get(publish_topic).post(publish_topic).put(publish_topic),
@@ -136,6 +279,11 @@ impl App {
                 }
                 iterations += 1;
                 if iterations % 60 == 0 {
+                    if let Some(db) = &app.auth.database {
+                        if let Err(error) = db.maintain().await {
+                            tracing::error!(%error,"account maintenance failed");
+                        }
+                    }
                     if let Err(e) = app.clean_attachments().await {
                         tracing::error!(error=%e, "attachment cleanup failed");
                     }
@@ -162,11 +310,12 @@ impl App {
         }
         Ok(())
     }
-    async fn context(
+    pub(crate) async fn context(
         &self,
         (params, ip): (Params, IpAddr),
         charge: bool,
     ) -> Result<(Params, Identity, Arc<Visitor>)> {
+        let ip = visitor_ip(&self.config, &params.headers, ip);
         let visitor = self.visitors.get(ip)?;
         if charge {
             self.visitors.charge(&visitor)?;
@@ -175,11 +324,72 @@ impl App {
             .auth
             .authenticate(&params.headers, &params.query)
             .await?;
+        if let (Some(db), Some(token)) = (&self.auth.database, &identity.token) {
+            db.record_token_access(token, ip).await?;
+        }
         Ok((params, identity, visitor))
     }
 }
 
-fn context_parts(request: &Request) -> (Params, IpAddr) {
+pub(crate) fn visitor_ip(config: &Config, headers: &HeaderMap, peer: IpAddr) -> IpAddr {
+    if !config.behind_proxy {
+        return peer;
+    }
+    // The last field and right-most hop are the ones appended by the nearest proxy.
+    // Never fall back to an earlier, potentially client-supplied hop on parse failure.
+    let Some(last) = headers
+        .get_all(config.proxy_forwarded_header.as_str())
+        .iter()
+        .next_back()
+    else {
+        return peer;
+    };
+    let Ok(header) = last.to_str() else {
+        return peer;
+    };
+    for value in header.rsplit(',') {
+        let Some(ip) = forwarded_ip(
+            value.trim(),
+            config
+                .proxy_forwarded_header
+                .eq_ignore_ascii_case("forwarded"),
+        ) else {
+            return peer;
+        };
+        if !config
+            .proxy_trusted_prefixes
+            .iter()
+            .any(|prefix| prefix.contains(&ip))
+        {
+            return ip;
+        }
+    }
+    peer
+}
+fn forwarded_ip(mut value: &str, rfc7239: bool) -> Option<IpAddr> {
+    if rfc7239 {
+        let mut addresses = value.split(';').filter_map(|field| {
+            let (key, value) = field.split_once('=')?;
+            key.trim()
+                .eq_ignore_ascii_case("for")
+                .then_some(value.trim())
+        });
+        value = match (addresses.next(), addresses.next()) {
+            (Some(address), None) => address,
+            _ => return None,
+        };
+    }
+    if let Some(quoted) = value.strip_prefix('"') {
+        value = quoted.strip_suffix('"')?;
+    }
+    value
+        .parse()
+        .ok()
+        .or_else(|| value.parse::<SocketAddr>().ok().map(|a| a.ip()))
+        .or_else(|| value.strip_prefix('[')?.strip_suffix(']')?.parse().ok())
+}
+
+pub(crate) fn context_parts(request: &Request) -> (Params, IpAddr) {
     (
         Params::new(request.headers().clone(), request.uri()),
         request
@@ -215,29 +425,11 @@ async fn health(State(app): State<Arc<App>>) -> Result<Json<Value>> {
     app.store.health().await?;
     Ok(Json(json!({"healthy":true})))
 }
-fn config_value(_app: &App) -> Value {
-    json!({"base_url":"", "app_root":"/", "enable_login":false, "require_login":false, "enable_signup":false, "enable_payments":false, "enable_calls":false, "enable_emails":false, "enable_reset_password":false, "enable_reservations":false, "enable_web_push":false, "billing_contact":"", "web_push_public_key":"", "disallowed_topics":RESERVED, "config_hash":env!("CARGO_PKG_VERSION")})
+fn config_value(app: &App) -> Value {
+    json!({"base_url":"", "app_root":"/", "enable_login":app.config.enable_login, "require_login":app.config.require_login, "enable_signup":app.config.enable_signup, "enable_payments":false, "enable_calls":false, "enable_emails":app.mailer.is_some() && app.auth.database.is_some(), "enable_reset_password":app.mailer.is_some() && app.auth.database.is_some() && !app.config.base_url.is_empty(), "enable_reservations":app.config.enable_reservations, "enable_web_push":!app.config.web_push_public_key.is_empty(), "billing_contact":"", "web_push_public_key":app.config.web_push_public_key, "disallowed_topics":RESERVED, "config_hash":env!("CARGO_PKG_VERSION")})
 }
 async fn web_config(State(app): State<Arc<App>>) -> Json<Value> {
     Json(config_value(&app))
-}
-async fn account_limits(State(app): State<Arc<App>>, request: Request) -> Result<Json<Value>> {
-    let (_, identity, _) = app.context(context_parts(&request), true).await?;
-    let used = app.attachment_bytes.load(Ordering::Relaxed);
-    Ok(Json(json!({
-        "username": identity.name.as_deref().unwrap_or("*"),
-        "role": if identity.admin { "admin" } else { "user" },
-        "limits": {
-            "basis":"server", "messages":0, "messages_expiry_duration":Config::duration(&app.config.cache_duration).as_secs(),
-            "emails":0,"calls":0,"reservations":0,
-            "attachment_file_size":app.config.attachment_file_size_limit,
-            "attachment_total_size":app.config.attachment_total_size_limit,
-            "attachment_expiry_duration":Config::duration(&app.config.attachment_expiry_duration).as_secs(),
-            "attachment_bandwidth":0
-        },
-        "stats": {"messages":0,"messages_remaining":0,"emails":0,"emails_remaining":0,"calls":0,"calls_remaining":0,"reservations":0,"reservations_remaining":0,
-            "attachment_total_size":used,"attachment_total_size_remaining":app.config.attachment_total_size_limit.saturating_sub(used)}
-    })))
 }
 async fn config_js(State(app): State<Arc<App>>) -> impl IntoResponse {
     (
@@ -311,13 +503,13 @@ async fn topic_auth(
 ) -> Result<Json<Value>> {
     let (_, identity, _) = app.context(context_parts(&request), true).await?;
     for topic in topics(&topic)? {
-        app.auth.authorize(&identity, &topic, false)?;
+        app.auth.authorize(&identity, &topic, false).await?;
     }
     Ok(Json(json!({"success":true})))
 }
 
 async fn publish_json(State(app): State<Arc<App>>, request: Request) -> Result<Response> {
-    let (mut p, identity, _) = app.context(context_parts(&request), true).await?;
+    let (mut p, identity, visitor) = app.context(context_parts(&request), true).await?;
     let body = read_body(request.into_body(), 64 * 1024).await?;
     let object: Value = serde_json::from_slice(&body)?;
     let object = object
@@ -347,7 +539,7 @@ async fn publish_json(State(app): State<Arc<App>>, request: Request) -> Result<R
                 p.query.insert(name.clone(), value.to_string());
             }
             "title" | "priority" | "click" | "icon" | "attach" | "filename" | "delay"
-            | "markdown" | "cache" | "firebase" | "sequence_id" => {
+            | "markdown" | "cache" | "firebase" | "sequence_id" | "email" => {
                 p.query.insert(
                     name.replace('_', "-"),
                     value
@@ -359,30 +551,86 @@ async fn publish_json(State(app): State<Arc<App>>, request: Request) -> Result<R
             _ => return Err(Error::bad(format!("unsupported publish field: {name}"))),
         }
     }
-    publish(app, topic, p, identity, Body::from(message)).await
+    publish(app, topic, p, identity, visitor.ip, Body::from(message)).await
 }
 async fn publish_topic(
     State(app): State<Arc<App>>,
     Path(topic): Path<String>,
     request: Request,
 ) -> Result<Response> {
-    let (p, identity, _) = app.context(context_parts(&request), true).await?;
-    publish(app, topic, p, identity, request.into_body()).await
+    let (p, identity, visitor) = app.context(context_parts(&request), true).await?;
+    publish(app, topic, p, identity, visitor.ip, request.into_body()).await
+}
+fn sequence_valid(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+    {
+        return Err(Error::bad("invalid sequence ID"));
+    }
+    Ok(())
+}
+async fn publish_sequence(State(app): State<Arc<App>>, request: Request) -> Result<Response> {
+    let mut parts = request.uri().path().trim_start_matches('/').split('/');
+    let topic = parts.next().unwrap_or_default().to_owned();
+    let sequence = parts.next().unwrap_or_default().to_owned();
+    sequence_valid(&sequence)?;
+    let (mut params, identity, visitor) = app.context(context_parts(&request), true).await?;
+    // A sequence in the path takes precedence over a conflicting header.
+    params.headers.remove("x-sequence-id");
+    params.headers.remove("sequence-id");
+    params.headers.remove("sid");
+    params.query.insert("x-sequence-id".into(), sequence);
+    publish(
+        app,
+        topic,
+        params,
+        identity,
+        visitor.ip,
+        request.into_body(),
+    )
+    .await
+}
+async fn sequence_event(State(app): State<Arc<App>>, request: Request) -> Result<Json<Message>> {
+    let parts: Vec<_> = request
+        .uri()
+        .path()
+        .trim_start_matches('/')
+        .split('/')
+        .collect();
+    let topic = parts[0];
+    let sequence = parts[1];
+    topic_valid(topic)?;
+    sequence_valid(sequence)?;
+    let (_, identity, _) = app.context(context_parts(&request), true).await?;
+    app.auth.authorize(&identity, topic, true).await?;
+    let event = if parts.last().is_some_and(|s| matches!(*s, "clear" | "read")) {
+        "message_clear"
+    } else {
+        "message_delete"
+    };
+    let mut message = Message::event(topic, event);
+    message.sequence_id = sequence.into();
+    message.expires = now() + Config::duration(&app.config.cache_duration).as_secs() as i64;
+    message.suppress_upstream = true;
+    let envelope = app.store.publish(message, true, None).await?;
+    Ok(Json(envelope.message.clone()))
 }
 async fn publish(
     app: Arc<App>,
     topic: String,
     p: Params,
     identity: Identity,
+    ip: IpAddr,
     body: Body,
 ) -> Result<Response> {
     topic_valid(&topic)?;
-    app.auth.authorize(&identity, &topic, true)?;
+    app.auth.authorize(&identity, &topic, true).await?;
     for names in [
-        &["x-email", "email", "mail", "e-mail", "x-e-mail", "e"][..],
-        &["x-call", "call"],
+        &["x-call", "call"][..],
         &["x-template", "template", "tpl"],
-        &["x-sequence-id", "sequence-id", "sid"],
         &["x-timezone", "timezone"],
     ] {
         if p.get(names).is_some() {
@@ -392,10 +640,35 @@ async fn publish(
             )));
         }
     }
-    let unified = p.boolean(&["x-unifiedpush", "unifiedpush", "up"], false)
+    let email = if let Some(recipient) = p
+        .get(&["x-email", "email", "mail", "e-mail", "x-e-mail", "e"])
+        .filter(|v| !v.is_empty())
+    {
+        let sender = app
+            .mailer
+            .as_ref()
+            .ok_or_else(|| Error::bad("SMTP sender is not configured"))?;
+        let to = crate::smtp::recipient(&app, &identity, &recipient).await?;
+        let permit = sender.reserve(identity.id.clone().unwrap_or_else(|| ip.to_string()))?;
+        Some((permit, to))
+    } else {
+        None
+    };
+    let mut unified = p.boolean(&["x-unifiedpush", "unifiedpush", "up"], false)
         || p.get(&["content-encoding"]).as_deref() == Some("aes128gcm");
-    let cache = p.boolean(&["x-cache", "cache"], true);
+    let mut cache = p.boolean(&["x-cache", "cache"], true);
+    let poll_id = p.get(&["x-poll-id", "poll-id"]).unwrap_or_default();
+    if !poll_id.is_empty() {
+        unified = false;
+        cache = false;
+    }
     let mut message = Message::event(topic, "message");
+    if let Some(sequence) = p.get(&["x-sequence-id", "sequence-id", "sid"]) {
+        sequence_valid(&sequence)?;
+        if sequence != message.id {
+            message.sequence_id = sequence;
+        }
+    }
     message.title = p.get(&["x-title", "title", "t"]).unwrap_or_default();
     message.priority = priority(
         &p.get(&["x-priority", "priority", "prio", "p"])
@@ -417,9 +690,9 @@ async fn publish(
         message.content_type = "text/markdown".into();
     }
     if let Some(delay) = p.get(&["x-delay", "delay", "x-at", "at", "x-in", "in"]) {
-        if !cache || unified {
+        if !cache || unified || email.is_some() {
             return Err(Error::bad(
-                "delay requires caching and a regular notification",
+                "delay requires caching and cannot be combined with UnifiedPush or email",
             ));
         }
         message.time = delay
@@ -438,7 +711,12 @@ async fn publish(
     }
     message.expires = message.time + Config::duration(&app.config.cache_duration).as_secs() as i64;
     let mut upload = None;
-    if unified {
+    if !poll_id.is_empty() {
+        drop(body);
+        message = Message::event(std::mem::take(&mut message.topic), "poll_request");
+        message.poll_id = poll_id.clone();
+        message.message = "New message".into();
+    } else if unified {
         let body = read_body(body, app.config.message_size_limit).await?;
         set_unified_payload(&mut message, &body);
     } else {
@@ -516,6 +794,7 @@ async fn publish(
                     ));
                 }
                 message.attachment = Some(Attachment {
+                    deleted: false,
                     name: name.clone(),
                     content_type,
                     size: file.size as i64,
@@ -540,8 +819,15 @@ async fn publish(
             message.message = "triggered".into();
         }
     }
+    message.suppress_upstream = unified;
     validate_message(&message, app.config.message_size_limit)?;
     let envelope = app.store.publish(message, cache, None).await?;
+    if let Some((permit, to)) = email {
+        app.mailer
+            .as_ref()
+            .unwrap()
+            .notification(permit, to, &envelope.message);
+    }
     if let Some(file) = upload.as_mut() {
         file.commit();
     }
@@ -678,10 +964,10 @@ async fn attachment(
         .attachment(id.clone())
         .await?
         .ok_or_else(|| Error::new(StatusCode::NOT_FOUND, "attachment not found"))?;
-    app.auth.authorize(&identity, &message.topic, false)?;
+    app.auth.authorize(&identity, &message.topic, false).await?;
     let file = message
         .attachment
-        .filter(|a| a.expires > now())
+        .filter(|a| !a.deleted && a.expires > now())
         .ok_or_else(|| Error::new(StatusCode::NOT_FOUND, "attachment expired"))?;
     let reader = tokio::fs::File::open(app.config.attachment_cache_dir.join(id))
         .await
@@ -762,7 +1048,7 @@ async fn subscribe(
     let (p, identity, visitor) = app.context(context_parts(&request), true).await?;
     let names = topics(&topic)?;
     for name in &names {
-        app.auth.authorize(&identity, name, false)?;
+        app.auth.authorize(&identity, name, false).await?;
     }
     let poll = p.boolean(&["x-poll", "poll", "po"], false);
     let since = p.since(poll)?;
@@ -792,6 +1078,7 @@ async fn subscribe(
         if !poll { yield Ok::<Bytes, Infallible>(Envelope::new(0, false, Message::event(&topic,"open")).wire(format)); }
         let watermark = snapshot.watermark;
         loop {
+            if app.auth.subscription_allowed(&identity,&names).await.is_err() { return; }
             let last = snapshot.messages.last().map(|m| m.seq);
             for envelope in snapshot.messages { if filter.matches(&envelope.message) { yield Ok(envelope.wire(format)); } }
             if poll || !snapshot.truncated || app.shutdown.is_cancelled() { break; }
@@ -810,9 +1097,10 @@ async fn subscribe(
             loop {
                 tokio::select! {
                     _ = app.shutdown.cancelled() => break,
-                    _ = interval.tick() => { yield Ok(Envelope::new(0, false, Message::event(&topic,"keepalive")).wire(format)); },
+                    _ = interval.tick() => { if app.auth.subscription_allowed(&identity,&names).await.is_err() { break; } yield Ok(Envelope::new(0, false, Message::event(&topic,"keepalive")).wire(format)); },
                     event = subscription.streams.next() => match event {
                         Some(Ok(envelope)) => {
+                            if app.auth.subscription_allowed(&identity,&names).await.is_err() { break; }
                             if envelope.cached && envelope.seq <= watermark { continue; }
                             if filter.matches(&envelope.message) { yield Ok(envelope.wire(format)); }
                         },
@@ -935,13 +1223,14 @@ async fn matrix_notify(State(app): State<Arc<App>>, request: Request) -> Result<
         let topic = url.path().trim_start_matches('/');
         let query = url.query_pairs().into_owned().collect();
         let identity = app.auth.authenticate(&HeaderMap::new(), &query).await?;
-        app.auth.authorize(&identity, topic, true)?;
+        app.auth.authorize(&identity, topic, true).await?;
         if !delivered.insert(topic.to_owned()) {
             continue;
         }
         let mut message = Message::event(topic, "message");
         message.expires = now() + Config::duration(&app.config.cache_duration).as_secs() as i64;
         set_unified_payload(&mut message, &body);
+        message.suppress_upstream = true;
         let dedup = event_id.map(|id| token_hash(&format!("{topic}\0{id}")));
         app.store.publish(message, true, dedup).await?;
     }

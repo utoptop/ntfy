@@ -7,9 +7,9 @@ services:
       # Optional environment pass-through; set the address when deploying.
       # If unset, server.yml can provide base-url instead.
       NTFY_BASE_URL:
-      # UnifiedPush endpoints are random capability URLs. Other topics are closed.
-      NTFY_AUTH_DEFAULT_ACCESS: deny-all
-      NTFY_AUTH_ACCESS: '[{"user":"*","topic":"up*","permission":"read-write"}]'
+      # Set these here or in server.yml; environment variables take precedence.
+      NTFY_AUTH_FILE: /var/lib/ntfy/auth.db
+      NTFY_ENABLE_LOGIN: "true"
       NTFY_CACHE_DURATION: 24h
       NTFY_WORKER_THREADS: 2
       NTFY_VISITOR_REQUEST_LIMIT_BURST: 120

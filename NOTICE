@@ -10,5 +10,10 @@ changes from https://github.com/binwiederhier/ntfy at commit
 Copyright Philipp C. Heckel and ntfy contributors.
 Used under the Apache License, Version 2.0; see LICENSE.
 
-The Rust server uses its own SQLite schema and configuration format.
+The Rust server uses a dedicated message-cache schema and supports standard
+ntfy authentication and Web Push SQLite schemas.
 See docs/compatibility.md before replacing an existing ntfy server.
+
+SQLite authentication/Web Push schemas, migrations and message-cache test
+fixtures are derived from ntfy v2.37.2
+(commit 05109571fd0931affb6f92b17bbfd62c4d2ea68a), licensed under Apache-2.0.

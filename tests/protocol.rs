@@ -662,7 +662,7 @@ async fn resource_limits_and_bad_parameters() {
         400
     );
     assert_eq!(
-        req(&app, "POST", "/one?sequence-id=x", "x", &[])
+        req(&app, "POST", "/one?sequence-id=bad%21", "x", &[])
             .await
             .status(),
         400
@@ -768,7 +768,13 @@ async fn actions_and_external_attachments() {
 
 #[test]
 fn strict_configuration_and_legacy_database_protection() {
-    assert!(serde_yaml::from_str::<Config>("upstream-base-url: https://ntfy.sh").is_err());
+    assert!(serde_yaml::from_str::<Config>("unsupported-option: true").is_err());
+    assert!(
+        serde_yaml::from_str::<Config>("upstream-base-url: https://ntfy.sh")
+            .unwrap()
+            .validate()
+            .is_err()
+    );
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("old.db");
     rusqlite::Connection::open(&path)
@@ -831,4 +837,180 @@ async fn unknown_cursor_does_not_leak_private_topic_and_ttl_applies() {
         .unwrap();
     assert_eq!(snapshot.messages.len(), 1);
     assert_eq!(snapshot.messages[0].message.topic, "public");
+}
+
+#[test]
+fn proxy_configuration_accepts_yaml_and_validates_header_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("server.yml");
+    std::fs::write(&path, "listen-http: ':80'\nbehind-proxy: true\ncache-duration: 72h\nproxy-forwarded-header: X-Real-IP\n").unwrap();
+    let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    assert!(config.behind_proxy);
+    assert_eq!(config.proxy_forwarded_header, "X-Real-IP");
+    assert!(!Config::default().behind_proxy);
+    let invalid = Config {
+        proxy_forwarded_header: "bad header".into(),
+        ..Config::default()
+    };
+    assert!(invalid.validate().is_err());
+}
+
+#[tokio::test]
+async fn proxy_request_limits_use_the_last_hop_only_when_enabled() {
+    for enabled in [false, true] {
+        let (_dir, app) = setup(|c| {
+            c.behind_proxy = enabled;
+            c.visitor_request_limit_burst = 1;
+            c.visitor_request_limit_replenish = "1h".into();
+        });
+        let first = req(
+            &app,
+            "POST",
+            "/proxy",
+            "one",
+            &[("X-Forwarded-For", "198.51.100.1, 203.0.113.1")],
+        )
+        .await;
+        assert_eq!(first.status(), 200);
+        let second = req(
+            &app,
+            "POST",
+            "/proxy",
+            "two",
+            &[("X-Forwarded-For", "198.51.100.1, 203.0.113.2")],
+        )
+        .await;
+        assert_eq!(second.status(), if enabled { 200 } else { 429 });
+        // Changing an earlier header or hop must not change the selected visitor.
+        let forged = req(
+            &app,
+            "POST",
+            "/proxy",
+            "three",
+            &[
+                ("X-Forwarded-For", "198.51.100.99"),
+                ("X-Forwarded-For", "198.51.100.88, 203.0.113.1"),
+            ],
+        )
+        .await;
+        assert_eq!(forged.status(), 429);
+    }
+}
+
+#[tokio::test]
+async fn proxy_ipv6_custom_headers_and_malformed_hops() {
+    for (header, first, second) in [
+        ("X-Forwarded-For", "198.51.100.1:1234", "198.51.100.1"),
+        ("X-Forwarded-For", "[2001:db8::1]:443", "2001:db8::1"),
+        ("X-Real-IP", "203.0.113.1", "203.0.113.1"),
+        (
+            "Forwarded",
+            "for=198.51.100.1;proto=https, For=\"[2001:db8::1]:1234\";by=proxy",
+            "for=\"[2001:db8::1]\"",
+        ),
+    ] {
+        let (_dir, app) = setup(|c| {
+            c.behind_proxy = true;
+            c.proxy_forwarded_header = header.into();
+            c.visitor_request_limit_burst = 1;
+            c.visitor_request_limit_replenish = "1h".into();
+        });
+        assert_eq!(
+            req(&app, "POST", "/proxy", "one", &[(header, first)])
+                .await
+                .status(),
+            200
+        );
+        assert_eq!(
+            req(&app, "POST", "/proxy", "two", &[(header, second)])
+                .await
+                .status(),
+            429
+        );
+    }
+    for (header, invalid) in [
+        ("X-Forwarded-For", "198.51.100.1, garbage"),
+        ("X-Forwarded-For", "198.51.100.1,"),
+        ("X-Forwarded-For", "\"203.0.113.1"),
+        ("Forwarded", "for=unknown"),
+        ("Forwarded", "for=198.51.100.1;for=203.0.113.1"),
+        ("Forwarded", "by=proxy"),
+    ] {
+        let (_dir, app) = setup(|c| {
+            c.behind_proxy = true;
+            c.proxy_forwarded_header = header.into();
+            c.visitor_request_limit_burst = 1;
+            c.visitor_request_limit_replenish = "1h".into();
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/proxy")
+            .header(header, invalid)
+            .extension(axum::extract::ConnectInfo(
+                "192.0.2.10:1234".parse::<std::net::SocketAddr>().unwrap(),
+            ))
+            .body(Body::from("one"))
+            .unwrap();
+        assert_eq!(app.router().oneshot(request).await.unwrap().status(), 200);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/proxy")
+            .extension(axum::extract::ConnectInfo(
+                "192.0.2.10:9999".parse::<std::net::SocketAddr>().unwrap(),
+            ))
+            .body(Body::from("two"))
+            .unwrap();
+        assert_eq!(app.router().oneshot(request).await.unwrap().status(), 429);
+    }
+}
+
+#[tokio::test]
+async fn proxy_subscription_limits_are_per_forwarded_client() {
+    let (_dir, app) = setup(|c| {
+        c.behind_proxy = true;
+        c.visitor_subscription_limit = 1;
+    });
+    let first = req(
+        &app,
+        "GET",
+        "/one/json",
+        Body::empty(),
+        &[("X-Forwarded-For", "203.0.113.1")],
+    )
+    .await;
+    let second = req(
+        &app,
+        "GET",
+        "/one/json",
+        Body::empty(),
+        &[("X-Forwarded-For", "203.0.113.2")],
+    )
+    .await;
+    assert_eq!(first.status(), 200);
+    assert_eq!(second.status(), 200);
+    assert_eq!(
+        req(
+            &app,
+            "GET",
+            "/two/json",
+            Body::empty(),
+            &[("X-Forwarded-For", "203.0.113.1")]
+        )
+        .await
+        .status(),
+        429
+    );
+    drop(first);
+    assert_eq!(
+        req(
+            &app,
+            "GET",
+            "/two/json",
+            Body::empty(),
+            &[("X-Forwarded-For", "203.0.113.1")]
+        )
+        .await
+        .status(),
+        200
+    );
 }

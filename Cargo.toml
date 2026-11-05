@@ -1,6 +1,6 @@
 [package]
 name = "ntfy-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -11,17 +11,28 @@ repository = "https://github.com/utoptop/ntfy"
 name = "ntfy"
 path = "src/main.rs"
 
+[features]
+# Package defaults only; runtime YAML, environment and CLI still take precedence.
+container = []
+
 [dependencies]
 argon2 = "0.5"
 async-stream = "0.3"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
+bcrypt = "0.17"
 bytes = "1"
 futures-util = "0.3"
 humantime = "2"
+ipnet = "2"
 mime_guess = "2"
+mailparse = "0.16"
+html2text = "0.14"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "ring", "webpki-roots", "pool"] }
 rand = "0.8"
-rusqlite = { version = "0.37", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+rpassword = "7"
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -30,17 +41,19 @@ subtle = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "fs", "io-util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "fs", "set-header"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+ece = "2.4"
+p256 = { version = "0.13", features = ["ecdsa"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 tempfile = "3"
 tokio-tungstenite = "0.29"
-tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 lto = "thin"

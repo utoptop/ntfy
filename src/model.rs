@@ -20,6 +20,9 @@ pub fn id() -> String {
         .map(char::from)
         .collect()
 }
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 pub fn zero(n: &i64) -> bool {
     *n == 0
 }
@@ -57,6 +60,8 @@ pub fn topic_valid(topic: &str) -> Result<()> {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Attachment {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub deleted: bool,
     pub name: String,
     #[serde(rename = "type", default, skip_serializing_if = "String::is_empty")]
     pub content_type: String,
@@ -69,6 +74,8 @@ pub struct Attachment {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Message {
+    #[serde(skip)]
+    pub suppress_upstream: bool,
     pub id: String,
     pub time: i64,
     pub event: String,
