@@ -1,5 +1,6 @@
 use crate::sqlite::Sqlite;
 use crate::{
+    concurrent_reads::ConcurrentReads,
     config::Config,
     error::{Error, Result},
     model::now,
@@ -9,10 +10,14 @@ use rand::{Rng, distributions::Alphanumeric};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::{path::Path, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
+type AccessReads = ConcurrentReads<(String, String), Option<(bool, bool)>>;
 #[derive(Clone)]
 pub struct AuthDb {
     db: Sqlite,
+    users: Arc<ConcurrentReads<String, Option<DbUser>>>,
+    tokens: Arc<ConcurrentReads<String, Option<DbUser>>>,
+    access: Arc<AccessReads>,
 }
 #[derive(Clone, Debug)]
 pub struct DbUser {
@@ -150,13 +155,22 @@ impl AuthDb {
         }
         Ok(Self {
             db: Sqlite::new(db, config.database_queue_size, "ntfy-auth-sqlite")?,
+            users: Arc::new(ConcurrentReads::new(config.database_queue_size)),
+            tokens: Arc::new(ConcurrentReads::new(config.database_queue_size)),
+            access: Arc::new(ConcurrentReads::new(config.database_queue_size)),
         })
     }
     pub async fn run<T: Send + 'static>(
         &self,
         job: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        self.db.run(job).await
+        let result = self.db.run(job).await;
+        // Public jobs can mutate account data. New requests after their reply
+        // must never join a read that was queued before the mutation.
+        self.users.invalidate();
+        self.tokens.invalidate();
+        self.access.invalidate();
+        result
     }
     pub async fn record_token_access(&self, token: &str, ip: std::net::IpAddr) -> Result<()> {
         let token = token.to_owned();
@@ -164,7 +178,7 @@ impl AuthDb {
     }
     pub async fn maintain(&self) -> Result<()> {
         self.run(|db| {
-            let tx = db.transaction()?;
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute(
                 "DELETE FROM user_token WHERE expires!=0 AND expires<?1",
                 [now()],
@@ -181,21 +195,21 @@ impl AuthDb {
     }
     pub async fn user(&self, identifier: &str) -> Result<Option<DbUser>> {
         let identifier = identifier.to_owned();
-        self.run(move |db| Ok(db.query_row(&format!("SELECT {USER_COLUMNS} FROM user u WHERE u.deleted IS NULL AND (u.user=?1 OR u.id=(SELECT user_id FROM user_email WHERE email=?1 AND is_primary=1)) ORDER BY CASE WHEN u.user=?1 THEN 0 ELSE 1 END LIMIT 1"),[identifier],read_user).optional()?)).await
+        self.users.run(identifier.clone(), self.db.run(move |db| Ok(db.prepare_cached(&format!("SELECT {USER_COLUMNS} FROM user u WHERE u.deleted IS NULL AND (u.user=?1 OR u.id=(SELECT user_id FROM user_email WHERE email=?1 AND is_primary=1)) ORDER BY CASE WHEN u.user=?1 THEN 0 ELSE 1 END LIMIT 1"))?.query_row([identifier],read_user).optional()?))).await
     }
     pub async fn user_by_token(&self, token: &str) -> Result<Option<DbUser>> {
         let token = token.to_owned();
-        self.run(move |db| Ok(db.query_row(&format!("SELECT {USER_COLUMNS} FROM user u JOIN user_token t ON t.user_id=u.id WHERE t.token=?1 AND (t.expires=0 OR t.expires>=?2) AND u.deleted IS NULL"),params![token,now()],read_user).optional()?)).await
+        self.tokens.run(token.clone(), self.db.run(move |db| Ok(db.prepare_cached(&format!("SELECT {USER_COLUMNS} FROM user u JOIN user_token t ON t.user_id=u.id WHERE t.token=?1 AND (t.expires=0 OR t.expires>=?2) AND u.deleted IS NULL"))?.query_row(params![token,now()],read_user).optional()?))).await
     }
     pub async fn access(&self, username: &str, topic: &str) -> Result<Option<(bool, bool)>> {
         let (username, topic) = (username.to_owned(), topic.to_owned());
-        self.run(move |db| {
+        self.access.run((username.clone(), topic.clone()), self.db.run(move |db| {
             if topic.starts_with("st_") {
-                let owner:Option<String>=db.query_row("SELECT user FROM user WHERE sync_topic=?1 AND deleted IS NULL",[&topic],|r|r.get(0)).optional()?;
+                let owner:Option<String>=db.prepare_cached("SELECT user FROM user WHERE sync_topic=?1 AND deleted IS NULL")?.query_row([&topic],|r|r.get(0)).optional()?;
                 return Ok(Some((owner.as_deref()==Some(&username),false)));
             }
-            Ok(db.query_row(r"SELECT a.read,a.write FROM user_access a JOIN user u ON u.id=a.user_id WHERE (u.user=?1 OR u.user='*') AND ?2 LIKE a.topic ESCAPE '\' ORDER BY u.user DESC,LENGTH(a.topic) DESC,a.write DESC LIMIT 1",params![username,topic],|r|Ok((r.get(0)?,r.get(1)?))).optional()?)
-        }).await
+            Ok(db.prepare_cached(r"SELECT a.read,a.write FROM user_access a JOIN user u ON u.id=a.user_id WHERE (u.user=?1 OR u.user='*') AND ?2 LIKE a.topic ESCAPE '\' ORDER BY u.user DESC,LENGTH(a.topic) DESC,a.write DESC LIMIT 1")?.query_row(params![username,topic],|r|Ok((r.get(0)?,r.get(1)?))).optional()?)
+        })).await
     }
     pub async fn add_user(&self, name: &str, hash: &str, role: &str) -> Result<()> {
         if !valid_username(name) || !matches!(role, "user" | "admin") {
@@ -231,7 +245,7 @@ impl AuthDb {
         }
         let (id, role) = (id.to_owned(), role.to_owned());
         self.run(move |db| {
-            let tx = db.transaction()?;
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             check_mutable(&tx, &id)?;
             tx.execute("UPDATE user SET role=?1 WHERE id=?2", params![role, id])?;
             if role == "admin" {
@@ -248,7 +262,7 @@ impl AuthDb {
     pub async fn remove_user(&self, id: &str, soft: bool) -> Result<()> {
         let id = id.to_owned();
         self.run(move |db| {
-            let tx = db.transaction()?;
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             check_mutable(&tx, &id)?;
             if soft {
                 tx.execute(
@@ -287,7 +301,7 @@ impl AuthDb {
             last_origin: origin.into(),
             provisioned: false,
         };
-        self.run(move|db|{let tx=db.transaction()?;
+        self.run(move|db|{let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let eligible:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM user WHERE id=?1 AND role!='anonymous' AND deleted IS NULL)",[&id],|r|r.get(0))?;
             if !eligible{return Err(missing());}
             tx.execute("INSERT INTO user_token(user_id,token,label,last_access,last_origin,expires,provisioned) VALUES (?1,?2,?3,?4,?5,?6,0)",params![id,token.token,token.label,token.last_access,token.last_origin,token.expires])?;
@@ -307,7 +321,7 @@ impl AuthDb {
     ) -> Result<Token> {
         let (id, value) = (id.to_owned(), value.to_owned());
         self.run(move|db|{
-            let tx=db.transaction()?;
+            let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let mut token=tx.query_row("SELECT token,label,last_access,last_origin,expires,provisioned FROM user_token WHERE user_id=?1 AND token=?2",params![id,value],read_token).optional()?.ok_or_else(missing)?;
             if token.provisioned {return Err(conflict("provisioned token cannot be changed"));}
             if let Some(label)=label { if label.len()>1024 {return Err(Error::bad("token label too long"));} token.label=label; }
@@ -346,7 +360,7 @@ impl AuthDb {
             username
         }
         .to_owned();
-        self.run(move|db|{let tx=db.transaction()?;
+        self.run(move|db|{let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let id:String=tx.query_row("SELECT id FROM user WHERE user=?1 AND deleted IS NULL",[username],|r|r.get(0)).optional()?.ok_or_else(missing)?;
             let provisioned:Option<bool>=tx.query_row("SELECT provisioned FROM user_access WHERE user_id=?1 AND topic=?2",params![id,topic],|r|r.get(0)).optional()?;
             if provisioned==Some(true) {return Err(conflict("provisioned access must be changed in the configuration"));}
@@ -374,7 +388,7 @@ fn initialize(db: &mut Connection, path: &Path) -> Result<()> {
         |r| r.get(0),
     )?;
     if tables == 0 {
-        let tx = db.transaction()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute_batch(include_str!("schema/auth_v11.sql"))?;
         tx.execute_batch("CREATE TABLE schemaVersion(id INT PRIMARY KEY,version INT NOT NULL,min_version INT NOT NULL DEFAULT 1); INSERT INTO schemaVersion VALUES(1,11,1);")?;
         tx.commit()?;
@@ -412,7 +426,7 @@ fn initialize(db: &mut Connection, path: &Path) -> Result<()> {
     }
     crate::sqlite_backup::backup(db, path, &format!("v{version}"))?;
     // Match upstream's migration order with foreign keys off during table rebuilds.
-    let tx = db.transaction()?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     if !has_min {
         tx.execute_batch(
             "ALTER TABLE schemaVersion ADD COLUMN min_version INT NOT NULL DEFAULT 1;",
@@ -449,7 +463,7 @@ fn initialize(db: &mut Connection, path: &Path) -> Result<()> {
 }
 
 fn provision_config(db: &mut Connection, config: &Config) -> Result<()> {
-    let tx = db.transaction()?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     // Reconcile only declarative entries. CLI-created users, ACLs and tokens survive.
     let existing = tx
         .prepare("SELECT user FROM user WHERE provisioned=1 AND user!='*'")?

@@ -26,7 +26,7 @@ Build a local image and run the supplied benchmark:
 
 ```sh
 docker buildx build --platform linux/arm64 -t ntfy-rs:verify --load .
-docker pull binwiederhier/ntfy:2.37.2
+docker pull binwiederhier/ntfy:v2.37.2
 bash scripts/bench-docker.sh
 ```
 

@@ -27,6 +27,30 @@ fn setup() -> (tempfile::TempDir, Arc<App>) {
 fn basic(name: &str, password: &str) -> String {
     format!("Basic {}", STANDARD.encode(format!("{name}:{password}")))
 }
+
+#[tokio::test]
+async fn independent_account_connections_can_create_tokens_concurrently() {
+    let (_dir, app) = setup();
+    let first = AuthDb::open(&app.config).unwrap();
+    first
+        .add_user("concurrent", &bcrypt::hash("secret", 4).unwrap(), "user")
+        .await
+        .unwrap();
+    let id = first.user("concurrent").await.unwrap().unwrap().id;
+    let second = AuthDb::open(&app.config).unwrap();
+    let create = |db: AuthDb, id: String| async move {
+        for _ in 0..40 {
+            db.create_token(&id, "parallel", now() + 3600, "127.0.0.1")
+                .await
+                .unwrap();
+        }
+    };
+    tokio::join!(
+        create(first.clone(), id.clone()),
+        create(second, id.clone())
+    );
+    assert_eq!(first.tokens(&id).await.unwrap().len(), 60);
+}
 async fn req(
     app: &Arc<App>,
     method: &str,

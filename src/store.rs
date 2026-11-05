@@ -3,6 +3,7 @@ use crate::{
     config::Config,
     error::{Error, Result},
     model::{Envelope, Message, now},
+    sqlite::WorkerSender,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
@@ -25,7 +26,7 @@ enum Command {
 }
 #[derive(Clone)]
 pub struct Store {
-    tx: mpsc::SyncSender<Command>,
+    tx: WorkerSender<Command>,
 }
 struct Database {
     connection: Connection,
@@ -79,7 +80,7 @@ impl Store {
             broker,
         };
         let (tx, rx) = mpsc::sync_channel(config.database_queue_size);
-        thread::Builder::new()
+        let thread = thread::Builder::new()
             .name("ntfy-sqlite".into())
             .spawn(move || {
                 let mut pending = None;
@@ -107,7 +108,9 @@ impl Store {
                     .connection
                     .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
             })?;
-        Ok(Self { tx })
+        Ok(Self {
+            tx: WorkerSender::new(tx, thread),
+        })
     }
     fn send(&self, command: Command) -> Result<()> {
         self.tx.try_send(command).map_err(|_| Error::busy())

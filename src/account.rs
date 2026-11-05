@@ -290,7 +290,7 @@ pub async fn settings(State(app): State<Arc<App>>, request: Request) -> Result<J
     }
     database(&app)?
         .run(move |db| {
-            let tx = db.transaction()?;
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let raw: String =
                 tx.query_row("SELECT prefs FROM user WHERE id=?1", [&id], |r| r.get(0))?;
             let mut prefs: Value = serde_json::from_str(&raw)?;
@@ -339,7 +339,7 @@ pub async fn subscription(State(app): State<Arc<App>>, request: Request) -> Resu
         return Err(Error::bad("invalid subscription URL"));
     }
     crate::model::topic_valid(&topic)?;
-    let result=database(&app)?.run(move|db|{let tx=db.transaction()?;
+    let result=database(&app)?.run(move|db|{let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let raw:String=tx.query_row("SELECT prefs FROM user WHERE id=?1",[&id],|r|r.get(0))?;let mut prefs:Value=serde_json::from_str(&raw)?;if !prefs.is_object(){return Err(Error::internal("invalid account preferences"));}
         if !prefs["subscriptions"].is_array(){prefs["subscriptions"]=json!([]);}
         let subscriptions=prefs["subscriptions"].as_array_mut().unwrap();
@@ -370,7 +370,7 @@ pub async fn reservation_add(State(app): State<Arc<App>>, request: Request) -> R
     let (read, write) = crate::auth_db::permission(&string(&value, "everyone", true)?)
         .ok_or_else(|| Error::bad("invalid permission"))?;
     let pattern = topic.replace('_', "\\_");
-    database(&app)?.run(move|db|{let tx=db.transaction()?;
+    database(&app)?.run(move|db|{let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let owner:Option<String>=tx.query_row("SELECT owner_user_id FROM user_access WHERE topic=?1 AND user_id=owner_user_id",[&pattern],|r|r.get(0)).optional()?;
         if owner.as_ref().is_some_and(|owner|owner!=&id){return Err(Error::new(StatusCode::CONFLICT,"topic already reserved"));}
         if !admin {
@@ -399,7 +399,7 @@ pub async fn reservation_delete(
     let erase = params.boolean(&["x-delete-messages", "delete-messages"], false);
     let cache_topic = topic.clone();
     let pattern = topic.replace('_', "\\_");
-    database(&app)?.run(move|db|{let tx=db.transaction()?;
+    database(&app)?.run(move|db|{let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let owned:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM user_access WHERE user_id=?1 AND owner_user_id=?1 AND topic=?2)",params![id,pattern],|r|r.get(0))?;
         if !owned {return Err(Error::new(StatusCode::UNAUTHORIZED,"topic is not reserved by this account"));}
         tx.execute("DELETE FROM user_access WHERE owner_user_id=?1 AND topic=?2",params![id,pattern])?;tx.commit()?;Ok(())}).await?;
@@ -431,7 +431,7 @@ pub(crate) async fn magic_link(
     let raw = crate::auth_db::random_id("", 64);
     let hash = crate::auth::token_hash(&raw);
     let kind = kind.to_owned();
-    database(app)?.run(move|db|{let tx=db.transaction()?;
+    database(app)?.run(move|db|{let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute("DELETE FROM user_magic_link WHERE user_id=?1 AND kind=?2 AND (?2='password_reset' OR email=?3)",params![id,kind,email])?;
         tx.execute("INSERT INTO user_magic_link(token_hash,kind,user_id,email,expires,created) VALUES(?1,?2,?3,?4,?5,?6)",params![hash,kind,id,email,now()+ttl,now()])?;
         tx.commit()?;Ok(())}).await?;
@@ -479,12 +479,12 @@ pub async fn email(State(app): State<Arc<App>>, request: Request) -> Result<Json
             Ok(())}).await?;
         send_verification(&app, &id, &email).await?;
     } else if method == Method::DELETE {
-        database(&app)?.run(move|db|{let tx=db.transaction()?;
+        database(&app)?.run(move|db|{let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute("DELETE FROM user_email WHERE user_id=?1 AND email=?2",params![id,email])?;
             tx.execute("DELETE FROM user_magic_link WHERE user_id=?1 AND email=?2 AND kind='email_verify'",params![id,email])?;
             tx.commit()?;Ok(())}).await?;
     } else if path.ends_with("/primary") {
-        database(&app)?.run(move|db|{let tx=db.transaction()?;
+        database(&app)?.run(move|db|{let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let verified:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM user_email WHERE user_id=?1 AND email=?2)",params![id,email],|r|r.get(0))?;
             if !verified{return Err(Error::bad("email is not verified"));}
             let occupied:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM user_email WHERE email=?1 AND is_primary=1 AND user_id!=?2)",params![email,id],|r|r.get(0))?;
@@ -503,7 +503,7 @@ pub async fn email_verify(State(app): State<Arc<App>>, request: Request) -> Resu
     mailer(&app)?;
     let value = body(request, false).await?;
     let hash = crate::auth::token_hash(&string(&value, "token", true)?);
-    let name=database(&app)?.run(move|db|{let tx=db.transaction()?;
+    let name=database(&app)?.run(move|db|{let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let row:Option<(String,String,String)>=tx.query_row("SELECT m.user_id,m.email,u.user FROM user_magic_link m JOIN user u ON u.id=m.user_id WHERE token_hash=?1 AND kind='email_verify' AND expires>=?2 AND u.deleted IS NULL",params![hash,now()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         let (id,email,name)=row.ok_or_else(||Error::bad("invalid or expired verification link"))?;
         tx.execute("DELETE FROM user_magic_link WHERE token_hash=?1",[hash])?;
@@ -573,7 +573,7 @@ pub async fn password_reset(State(app): State<Arc<App>>, request: Request) -> Re
         .auth
         .hash_password(string(&value, "password", true)?)
         .await?;
-    database(&app)?.run(move|db|{let tx=db.transaction()?;
+    database(&app)?.run(move|db|{let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let id:Option<String>=tx.query_row("SELECT m.user_id FROM user_magic_link m JOIN user u ON u.id=m.user_id WHERE m.token_hash=?1 AND m.kind='password_reset' AND m.expires>=?2 AND u.provisioned=0 AND u.deleted IS NULL",params![token_hash,now()],|r|r.get(0)).optional()?;
         let id=id.ok_or_else(||Error::bad("invalid or expired password reset link"))?;
         tx.execute("UPDATE user SET pass=?1 WHERE id=?2",params![password,id])?;
