@@ -154,7 +154,7 @@ async def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8080")
-    parser.add_argument("--push-origin", default="https://ntfy.aosn.de")
+    parser.add_argument("--push-origin", default="https://ntfy.example.com")
     parser.add_argument("--requests", type=int, default=3000)
     parser.add_argument("--concurrency", type=int, default=32)
     parser.add_argument("--connections", type=int, default=1000)

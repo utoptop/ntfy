@@ -1,5 +1,0 @@
-ntfy.aosn.de {
-    reverse_proxy ntfy:8080 {
-        flush_interval -1
-    }
-}

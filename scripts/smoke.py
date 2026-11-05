@@ -8,7 +8,7 @@ import urllib.request
 import uuid
 
 base = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8080").rstrip("/")
-push_origin = (sys.argv[2] if len(sys.argv) > 2 else "https://ntfy.aosn.de").rstrip("/")
+push_origin = (sys.argv[2] if len(sys.argv) > 2 else "https://ntfy.example.com").rstrip("/")
 topic = "upSmoke" + uuid.uuid4().hex[:12]
 
 

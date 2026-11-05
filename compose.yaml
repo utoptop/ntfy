@@ -4,7 +4,9 @@ services:
     restart: unless-stopped
     command: serve
     environment:
-      NTFY_BASE_URL: https://ntfy.aosn.de
+      # Optional environment pass-through; set the address when deploying.
+      # If unset, server.yml can provide base-url instead.
+      NTFY_BASE_URL:
       # UnifiedPush endpoints are random capability URLs. Other topics are closed.
       NTFY_AUTH_DEFAULT_ACCESS: deny-all
       NTFY_AUTH_ACCESS: '[{"user":"*","topic":"up*","permission":"read-write"}]'

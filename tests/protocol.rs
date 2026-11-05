@@ -24,7 +24,7 @@ fn setup(change: impl FnOnce(&mut Config)) -> (tempfile::TempDir, Arc<App>) {
     let mut config = Config {
         cache_file: dir.path().join("cache.db"),
         attachment_cache_dir: dir.path().join("attachments"),
-        base_url: "https://ntfy.aosn.de".into(),
+        base_url: "https://ntfy.example.com".into(),
         visitor_request_limit_burst: 100_000,
         visitor_subscription_limit: 1000,
         ..Config::default()
@@ -423,8 +423,8 @@ async fn matrix_gateway_discovery_multidevice_dedup_and_binary_chain() {
     );
     let body = matrix(
         &[
-            "https://ntfy.aosn.de/upPhone?up=1",
-            "https://ntfy.aosn.de/upTablet?up=1",
+            "https://ntfy.example.com/upPhone?up=1",
+            "https://ntfy.example.com/upTablet?up=1",
         ],
         "$event",
     );
@@ -447,16 +447,16 @@ async fn matrix_rejects_foreign_and_malformed_keys_without_network_requests() {
     let (_dir, app) = setup(|_| {});
     let keys = [
         "https://evil.example/upPhone",
-        "https://ntfy.aosn.de.evil.example/upPhone",
-        "https://ntfy.aosn.de@evil.example/upPhone",
-        "http://ntfy.aosn.de/upPhone",
-        "https://ntfy.aosn.de/up%00secret",
-        "https://ntfy.aosn.de/up%2Fsecret",
-        "https://ntfy.aosn.de/upOne,upTwo",
-        "https://ntfy.aosn.de/upPhone/json",
-        "https://ntfy.aosn.de:444/upPhone",
-        "https://ntfy.aosn.de//upPhone",
-        "https://ntfy.aosn.de/upPhone#fragment",
+        "https://ntfy.example.com.evil.example/upPhone",
+        "https://ntfy.example.com@evil.example/upPhone",
+        "http://ntfy.example.com/upPhone",
+        "https://ntfy.example.com/up%00secret",
+        "https://ntfy.example.com/up%2Fsecret",
+        "https://ntfy.example.com/upOne,upTwo",
+        "https://ntfy.example.com/upPhone/json",
+        "https://ntfy.example.com:444/upPhone",
+        "https://ntfy.example.com//upPhone",
+        "https://ntfy.example.com/upPhone#fragment",
     ];
     let response = req(
         &app,
@@ -479,7 +479,7 @@ async fn matrix_acl_no_base_url_oversize_and_bad_json() {
             &app,
             "POST",
             "/_matrix/push/v1/notify",
-            matrix(&["https://ntfy.aosn.de/upPhone?up=1"], "$one"),
+            matrix(&["https://ntfy.example.com/upPhone?up=1"], "$one"),
             &[]
         )
         .await
@@ -491,7 +491,7 @@ async fn matrix_acl_no_base_url_oversize_and_bad_json() {
             &app,
             "POST",
             "/_matrix/push/v1/notify",
-            matrix(&["https://ntfy.aosn.de/private"], "$two"),
+            matrix(&["https://ntfy.example.com/private"], "$two"),
             &[]
         )
         .await
@@ -524,7 +524,7 @@ async fn matrix_acl_no_base_url_oversize_and_bad_json() {
             &app,
             "POST",
             "/_matrix/push/v1/notify",
-            matrix(&["https://ntfy.aosn.de/upPhone"], "$event"),
+            matrix(&["https://ntfy.example.com/upPhone"], "$event"),
             &[]
         )
         .await
@@ -536,7 +536,7 @@ async fn matrix_acl_no_base_url_oversize_and_bad_json() {
 #[tokio::test]
 async fn durable_restart_and_matrix_dedup_survive_restart() {
     let (_dir, app) = setup(|_| {});
-    let body = matrix(&["https://ntfy.aosn.de/upPhone?up=1"], "$persist");
+    let body = matrix(&["https://ntfy.example.com/upPhone?up=1"], "$persist");
     req(&app, "POST", "/_matrix/push/v1/notify", body.clone(), &[]).await;
     let config = (*app.config).clone();
     drop(app);

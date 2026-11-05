@@ -31,5 +31,5 @@ jobs:
           cache-to: type=gha,mode=max
       - run: |
           docker run --rm ntfy-rs:test --version
-          docker run -d --name ntfy-rs -p 8080:8080 -e NTFY_BASE_URL=https://ntfy.aosn.de ntfy-rs:test
+          docker run -d --name ntfy-rs -p 8080:8080 -e NTFY_BASE_URL=https://ntfy.example.com ntfy-rs:test
           python3 scripts/smoke.py http://127.0.0.1:8080

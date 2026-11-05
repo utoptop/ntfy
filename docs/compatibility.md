@@ -30,7 +30,7 @@ This release targets self-hosted Matrix / Element X Android notifications throug
 - Matrix request bodies are bounded by `message-size-limit` (default 4096 bytes), matching the common upstream default. Per-topic event-ID deduplication lasts while the corresponding cached message is retained; count-only updates are not deduplicated.
 - Matrix multi-device requests may be partially delivered if a later device encounters a transient error; homeserver retries are safe for event notifications because successful device deliveries are deduplicated. Do not interpret transient HTTP errors as permanent pushkey rejection.
 - The Compose default grants `up*` anonymous read/write access by unguessable URL. For authenticated readers, retain anonymous write-only access for homeservers and grant read access to a configured phone user.
-- No built-in TLS listener. Terminate HTTPS at Caddy/nginx/your existing ingress. `base-url` must be an origin, not a URL path prefix. Forwarded IP headers are not trusted by this release.
+- No built-in TLS listener. HTTPS and reverse proxy configuration belong to your deployment environment. The image has no preset public domain; configure `base-url` at runtime as an origin, not a URL path prefix. Forwarded IP headers are not trusted by this release.
 - Raw streams flatten line breaks, as the upstream protocol does. SSE message events have `data:` without a named `event: message`, preserving EventSource.onmessage behavior.
 - Retention is bounded by age and count. Polling is paginated and indicates truncation in a response header. Live subscriptions page internally before switching to live events; under sustained pressure the client may need multiple reconnects to catch up.
 

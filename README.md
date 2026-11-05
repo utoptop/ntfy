@@ -4,43 +4,43 @@
 
 这是独立实现，**不是上游全部功能的等价替换**。保留上游 Web 应用，支持常规发布订阅、附件和定时消息；未实现 Firebase/FCM、iOS/APNs 上游唤醒、Web Push、邮件、计费、集群和账号管理 API。配置格式及数据库格式也不同，详见 [兼容范围](docs/compatibility.md)。
 
-## 部署到 ntfy.aosn.de
+## 本地构建与推送
 
-将域名 A/AAAA 记录指向部署服务器。已有 HTTPS 反向代理时：
+在本地仓库目录执行，Docker Hub 需已登录 `utoptop`：
 
 ```sh
-git clone https://github.com/utoptop/ntfy.git
-cd ntfy
+docker buildx build --platform linux/amd64,linux/arm64 -t utoptop/ntfy:main --push .
+```
+
+此命令构建两个架构并推送镜像。镜像使用运行时配置，不包含具体服务域名。服务器部署由使用者自行完成。
+
+## 服务器运行配置
+
+`compose.yaml` 是可选的单服务运行示例。将镜像拉取到自己的服务器后启动：
+
+```sh
 docker compose pull
 docker compose up -d
 curl http://127.0.0.1:8080/v1/health
 ```
 
-`compose.yaml` 已设置 `NTFY_BASE_URL=https://ntfy.aosn.de`，持久化数据写入独立的 `ntfy-data` Docker volume，使用 UID/GID `10001`，端口只绑定本机 `127.0.0.1:8080`。将现有代理的 `ntfy.aosn.de` 转发至此端口，关闭响应缓冲并允许长连接与 WebSocket。
+Matrix 网关和附件链接需要在部署时设置 `NTFY_BASE_URL` 为实际外部访问地址；可通过 shell 环境或 `.env` 传给 Compose，也可以使用 `server.yml` 的 `base-url`。仓库不预设域名，HTTPS、反向代理和证书由自己的部署环境管理。
 
-没有现有 HTTPS 代理时，仓库提供 Caddy 自动签发证书的配置：
+持久化数据写入独立的 `ntfy-data` Docker volume，容器使用 UID/GID `10001`，示例端口只绑定本机 `127.0.0.1:8080`，可按自己的网络环境调整。
 
-```sh
-docker compose -f compose.yaml -f compose.caddy.yaml up -d
-```
-
-这要求该服务器的 80/443 端口可用，DNS 已正确解析。Caddy 在容器网络内转发至 `ntfy:8080`。
-
-验证公网入口：
+验证运行中的本地容器时，第二个参数传入该容器配置的外部访问地址：
 
 ```sh
-curl https://ntfy.aosn.de/v1/health
-curl https://ntfy.aosn.de/_matrix/push/v1/notify
-# {"unifiedpush":{"gateway":"matrix"}}
-curl 'https://ntfy.aosn.de/upExample?up=1'
-# {"unifiedpush":{"version":1}}
+python3 scripts/smoke.py http://127.0.0.1:8080 "$NTFY_BASE_URL"
 ```
+
+下文 `https://ntfy.example.com` 仅为文档和协议测试使用的示例地址，请在部署后按实际地址使用。
 
 ## Element X Android 设置
 
-1. 手机安装支持 UnifiedPush 的 **ntfy Android**，将默认服务器改为 `https://ntfy.aosn.de`，启用其 UnifiedPush 分发功能。
+1. 手机安装支持 UnifiedPush 的 **ntfy Android**，将默认服务器改为 `https://ntfy.example.com`，启用其 UnifiedPush 分发功能。
 2. 在 Element X 的通知设置中选择 UnifiedPush / ntfy。必要时重新启用推送，让客户端重新注册端点。
-3. 在 Element X 的通知故障排查中确认网关为 `https://ntfy.aosn.de/_matrix/push/v1/notify`，并执行测试。
+3. 在 Element X 的通知故障排查中确认网关为 `https://ntfy.example.com/_matrix/push/v1/notify`，并执行测试。
 4. 允许 ntfy 和 Element X 后台运行；ntfy 依靠持续连接接收消息。这个服务端没有实现 Google FCM，不能替代被系统终止的 Android 分发器进程。
 
 不需要手工创建 `up*` 主题，也通常不需要改 Synapse 的服务器配置；客户端通过 Matrix pusher 注册自己的端点。具体客户端版本的菜单名称可能不同。参考 [UnifiedPush 排查指南](https://unifiedpush.org/users/troubleshooting/setup/) 和 [Element 官方说明](https://docs.element.io/latest/element-support/element-androidios-client-settings/using-unified-push-and-ntfy-for-push-notifications/)。
@@ -81,36 +81,30 @@ ACL 中具体用户优先于 `*`，同类规则中更具体的主题模式优先
 
 ```sh
 # 实时 NDJSON / SSE / WebSocket 订阅
-curl -N https://ntfy.aosn.de/upDemo/json
-curl -N https://ntfy.aosn.de/upDemo/sse
-# WebSocket: wss://ntfy.aosn.de/upDemo/ws
+curl -N https://ntfy.example.com/upDemo/json
+curl -N https://ntfy.example.com/upDemo/sse
+# WebSocket: wss://ntfy.example.com/upDemo/ws
 
 # 常规通知
-curl -H 'Title: Backup' -H 'Priority: high' -d 'Backup complete' https://ntfy.aosn.de/upDemo
+curl -H 'Title: Backup' -H 'Priority: high' -d 'Backup complete' https://ntfy.example.com/upDemo
 
 # 历史消息，since 支持 all / latest / none / 时间戳 / 10m / 消息 ID
-curl 'https://ntfy.aosn.de/upDemo/json?poll=1&since=all'
+curl 'https://ntfy.example.com/upDemo/json?poll=1&since=all'
 
 # Matrix 网关测试，不需要 homeserver 凭据
-curl -H 'Content-Type: application/json' -d '{"notification":{"event_id":"$example-1","room_id":"!example:matrix.org","devices":[{"app_id":"io.element.android.x","pushkey":"https://ntfy.aosn.de/upDemo?up=1"}]}}' \
-  https://ntfy.aosn.de/_matrix/push/v1/notify
+curl -H 'Content-Type: application/json' -d '{"notification":{"event_id":"$example-1","room_id":"!example:matrix.org","devices":[{"app_id":"io.element.android.x","pushkey":"https://ntfy.example.com/upDemo?up=1"}]}}' \
+  https://ntfy.example.com/_matrix/push/v1/notify
 ```
 
-## 构建、测试和推送
+## 开发验证
 
 ```sh
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
-
-# 构建镜像
-docker buildx build --platform linux/amd64,linux/arm64 -t utoptop/ntfy:main --push .
-
-# 验证运行中的本地容器
-python3 scripts/smoke.py http://127.0.0.1:8080
 ```
 
-发布前需要 Docker Hub 已登录 `utoptop`。Dockerfile 内使用锁定的 Cargo/npm 依赖，Web 应用在构建阶段编译，最终镜像仅包含 Rust 二进制、静态资源和 Alpine 运行环境。CI 检查 Rust 格式、Clippy、集成测试及容器 smoke test。
+Dockerfile 使用锁定的 Cargo/npm 依赖，Web 应用在构建阶段编译，最终镜像仅包含 Rust 二进制、静态资源和 Alpine 运行环境。CI 检查 Rust 格式、Clippy、集成测试及容器 smoke test；CI 中的示例域名仅用于本地协议验证，不会连接或部署公网服务。
 
 ## 性能与运维
 

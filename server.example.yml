@@ -1,6 +1,7 @@
 # Optional /etc/ntfy/server.yml. Environment variables take precedence.
 listen-http: 0.0.0.0:8080
-base-url: https://ntfy.aosn.de
+# Set your external URL at deployment time for Matrix/attachment links.
+base-url: ""
 cache-file: /var/lib/ntfy/cache.db
 cache-duration: 24h
 cache-max-messages: 100000
