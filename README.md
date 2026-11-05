@@ -150,7 +150,7 @@ Dockerfile 使用锁定的 Cargo/npm 依赖，Web 应用在构建阶段编译，
 - `GET /v1/health` 检查数据库；`GET /metrics` 提供基础 Prometheus 指标，要求具有 `admin: true` 的用户凭据。
 - 默认不信任转发头；反向代理部署可配置 `behind-proxy` 和 `proxy-trusted-hosts`。Matrix 网关不使用普通发布的 IP 速率限额，但仍受并发/队列/请求大小限制；请按实际部署在代理侧设置合适的限制。
 
-历史版本 0.1 的本机 arm64 对照测试（1,000 个订阅、32 并发、每轮 30,000 次 Matrix 推送、三轮中位数）：Rust 约 **5,257 次/秒**，上游 Go 2.37.2 约 **2,467 次/秒**；负载后的进程 RSS 为 **34.46 MiB / 128.95 MiB**。两版均使用 SQLite FULL + WAL 和 Docker volume，所有投递数量吻合、HTTP 错误为零。这组旧版数据不用于证明 0.2 新增功能的性能，也不代表持续生产容量；原始数据与限制见 [性能报告](docs/performance.md)。
+0.2.0 的本机 arm64 对照测试同时开启两版的 `auth-file` 和登录功能，采用匿名 read-write 访问（1,000 个订阅、32 并发、每轮 30,000 次 Matrix 推送、三轮中位数）：Rust **4,928 次/秒**，上游 Go 2.37.2 **2,323 次/秒**；负载后进程 RSS 为 **39.54 MiB / 125.61 MiB**。这组负载下吞吐约为 **2.12 倍**，RSS 降低 **68.5%**。两版使用相同 2 CPU / 512 MiB 限制、SQLite FULL + WAL 和 Docker volume，所有投递数量吻合、HTTP 错误为零。测试不包含密码哈希、多账号身份或外部转发，也不代表持续生产容量；原始数据、波动范围及限制见 [性能报告](docs/performance.md)。
 
 ## 来源与许可
 

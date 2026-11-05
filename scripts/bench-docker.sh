@@ -5,7 +5,7 @@ set -euo pipefail
 results_dir=${RESULTS_DIR:-bench-results}
 mkdir -p "$results_dir"
 requests=${REQUESTS:-30000}
-auth_options=()
+auth_options=(-e NTFY_AUTH_FILE= -e NTFY_ENABLE_LOGIN=false)
 if [ "${AUTH_DATABASE:-0}" = 1 ]; then
   auth_options=(-e NTFY_AUTH_FILE=/var/lib/ntfy/auth.db -e NTFY_ENABLE_LOGIN=true)
 fi

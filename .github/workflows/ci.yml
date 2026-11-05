@@ -33,3 +33,23 @@ jobs:
           docker run --rm ntfy-rs:test --version
           docker run -d --name ntfy-rs -p 8080:8080 -e NTFY_BASE_URL=https://ntfy.example.com ntfy-rs:test
           python3 scripts/smoke.py http://127.0.0.1:8080
+      - name: Standard YAML configuration overrides container defaults
+        run: |
+          cat > "$RUNNER_TEMP/ntfy-config.yml" <<'YAML'
+          listen-http: ":80"
+          behind-proxy: true
+          cache-file: /var/lib/ntfy/custom-cache.db
+          cache-duration: 72h
+          auth-file: /var/lib/ntfy/auth.db
+          auth-default-access: read-write
+          enable-login: true
+          enable-signup: false
+          upstream-base-url: https://ntfy.sh
+          YAML
+          chmod 644 "$RUNNER_TEMP/ntfy-config.yml"
+          docker run -d --name ntfy-config -p 18080:80 \
+            -v "$RUNNER_TEMP/ntfy-config.yml:/etc/ntfy/server.yml:ro" \
+            -e NTFY_BASE_URL=https://ntfy.example.com ntfy-rs:test
+          python3 scripts/smoke.py http://127.0.0.1:18080
+          docker exec ntfy-config ntfy healthcheck
+          docker exec ntfy-config sh -c 'test -f /var/lib/ntfy/custom-cache.db && test -f /var/lib/ntfy/auth.db && test ! -f /var/lib/ntfy/cache.db'
