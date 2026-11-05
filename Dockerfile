@@ -2,7 +2,7 @@
 FROM --platform=$BUILDPLATFORM alpine:3.23 AS web-build
 ARG BUILDARCH
 RUN --mount=type=cache,id=ntfy-apk-${BUILDARCH},target=/var/cache/apk,sharing=locked \
-    apk --timeout 60 add nodejs npm
+    apk --cache-dir /var/cache/apk --timeout 60 add nodejs npm
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
@@ -12,18 +12,18 @@ RUN npm run build && cp build/index.html build/app.html && rm -f build/config.js
 FROM alpine:3.23 AS rust-build
 ARG TARGETARCH
 RUN --mount=type=cache,id=ntfy-apk-${TARGETARCH},target=/var/cache/apk,sharing=locked \
-    apk --timeout 60 add rust cargo musl-dev gcc
+    apk --cache-dir /var/cache/apk --timeout 60 add rust cargo musl-dev gcc
 ENV CARGO_HOME=/usr/local/cargo
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 COPY tests/ tests/
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,id=ntfy-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=ntfy-rust-${TARGETARCH},target=/build/target \
     cargo build --locked --release && cp target/release/ntfy /usr/local/bin/ntfy
 
 FROM rust-build AS test
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,id=ntfy-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=ntfy-rust-${TARGETARCH},target=/build/target \
     cargo test --locked
 
