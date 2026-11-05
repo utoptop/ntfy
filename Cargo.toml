@@ -1,0 +1,49 @@
+[package]
+name = "ntfy-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "An asynchronous Rust implementation of the ntfy self-hosted notification protocol"
+repository = "https://github.com/utoptop/ntfy"
+
+[[bin]]
+name = "ntfy"
+path = "src/main.rs"
+
+[dependencies]
+argon2 = "0.5"
+async-stream = "0.3"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+bytes = "1"
+futures-util = "0.3"
+humantime = "2"
+mime_guess = "2"
+rand = "0.8"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+subtle = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "fs", "io-util"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["io", "rt"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "set-header"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[dev-dependencies]
+http-body-util = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+tempfile = "3"
+tokio-tungstenite = "0.29"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

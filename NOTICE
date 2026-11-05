@@ -1,0 +1,14 @@
+ntfy-rs
+Copyright 2026 ntfy-rs contributors
+
+This project implements the ntfy HTTP notification protocol in Rust.
+It is an independent implementation, not an official ntfy release.
+
+The web/ directory is the ntfy web application, copied without functional
+changes from https://github.com/binwiederhier/ntfy at commit
+59f9931f0f365f1e33871ed9d641b33e8039c190 (2026-11-05 retrieval).
+Copyright Philipp C. Heckel and ntfy contributors.
+Used under the Apache License, Version 2.0; see LICENSE.
+
+The Rust server uses its own SQLite schema and configuration format.
+See docs/compatibility.md before replacing an existing ntfy server.

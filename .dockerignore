@@ -1,0 +1,16 @@
+**
+!Cargo.toml
+!Cargo.lock
+!src
+!src/**
+!tests
+!tests/**
+!web
+!web/**
+web/node_modules
+web/build
+web/test-results
+web/playwright-report
+!LICENSE
+!NOTICE
+!Dockerfile

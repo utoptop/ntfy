@@ -1,0 +1,487 @@
+import beep from "../sounds/beep.mp3";
+import juntos from "../sounds/juntos.mp3";
+import pristine from "../sounds/pristine.mp3";
+import ding from "../sounds/ding.mp3";
+import dadum from "../sounds/dadum.mp3";
+import pop from "../sounds/pop.mp3";
+import popSwoosh from "../sounds/pop-swoosh.mp3";
+import config from "./config";
+import emojisMapped from "./emojisMapped";
+import { THEME, DATE_FORMAT, TIME_FORMAT } from "./Prefs";
+
+export const tiersUrl = (baseUrl) => `${baseUrl}/v1/account/billing/tiers`;
+export const shortUrl = (url) => url.replaceAll(/https?:\/\//g, "");
+export const expandUrl = (url) => [`https://${url}`, `http://${url}`];
+export const expandSecureUrl = (url) => `https://${url}`;
+
+// findSubscriptionForRoute returns the subscription the current route points to: /:topic for the
+// default server, /:baseUrl/:topic for any other server. The default server only matches when the
+// route has no baseUrl, or the same topic on two servers would resolve to whichever is listed first.
+export const findSubscriptionForRoute = (subscriptions, params, defaultBaseUrl) => {
+  const baseUrls = params.baseUrl ? expandUrl(params.baseUrl) : [defaultBaseUrl];
+  return subscriptions.find((s) => baseUrls.includes(s.baseUrl) && params.topic === s.topic);
+};
+export const topicUrl = (baseUrl, topic) => `${baseUrl}/${topic}`;
+export const topicUrlWs = (baseUrl, topic) =>
+  `${topicUrl(baseUrl, topic)}/ws`.replaceAll("https://", "wss://").replaceAll("http://", "ws://");
+export const topicUrlJson = (baseUrl, topic) => `${topicUrl(baseUrl, topic)}/json`;
+export const topicUrlJsonPoll = (baseUrl, topic) => `${topicUrlJson(baseUrl, topic)}?poll=1`;
+export const topicUrlJsonPollWithSince = (baseUrl, topic, since) => `${topicUrlJson(baseUrl, topic)}?poll=1&since=${since}`;
+export const topicUrlAuth = (baseUrl, topic) => `${topicUrl(baseUrl, topic)}/auth`;
+export const topicShortUrl = (baseUrl, topic) => shortUrl(topicUrl(baseUrl, topic));
+export const webPushUrl = (baseUrl) => `${baseUrl}/v1/webpush`;
+export const accountUrl = (baseUrl) => `${baseUrl}/v1/account`;
+export const accountLoginUrl = (baseUrl) => `${baseUrl}/v1/account/login`;
+export const accountPasswordUrl = (baseUrl) => `${baseUrl}/v1/account/password`;
+export const accountTokenUrl = (baseUrl) => `${baseUrl}/v1/account/token`;
+export const accountSettingsUrl = (baseUrl) => `${baseUrl}/v1/account/settings`;
+export const accountSubscriptionUrl = (baseUrl) => `${baseUrl}/v1/account/subscription`;
+export const accountReservationUrl = (baseUrl) => `${baseUrl}/v1/account/reservation`;
+export const accountReservationSingleUrl = (baseUrl, topic) => `${baseUrl}/v1/account/reservation/${topic}`;
+export const accountBillingSubscriptionUrl = (baseUrl) => `${baseUrl}/v1/account/billing/subscription`;
+export const accountBillingPortalUrl = (baseUrl) => `${baseUrl}/v1/account/billing/portal`;
+export const accountPhoneUrl = (baseUrl) => `${baseUrl}/v1/account/phone`;
+export const accountPhoneVerifyUrl = (baseUrl) => `${baseUrl}/v1/account/phone/verify`;
+export const accountEmailUrl = (baseUrl) => `${baseUrl}/v1/account/email`;
+export const accountEmailVerifyUrl = (baseUrl) => `${baseUrl}/v1/account/email/verify`;
+export const accountEmailPrimaryUrl = (baseUrl) => `${baseUrl}/v1/account/email/primary`;
+export const accountEmailResendUrl = (baseUrl) => `${baseUrl}/v1/account/email/resend`;
+export const accountPasswordResetRequestUrl = (baseUrl) => `${baseUrl}/v1/account/password/reset/request`;
+export const accountPasswordResetUrl = (baseUrl) => `${baseUrl}/v1/account/password/reset`;
+
+export const validUrl = (url) => url.match(/^https?:\/\/.+/);
+
+export const disallowedTopic = (topic) => config.disallowed_topics.includes(topic);
+
+export const validTopic = (topic) => {
+  if (disallowedTopic(topic)) {
+    return false;
+  }
+  return topic.match(/^([-_a-zA-Z0-9]{1,64})$/); // Regex must match Go & Android app!
+};
+
+export const topicDisplayName = (subscription) => {
+  if (subscription.displayName) {
+    return subscription.displayName;
+  }
+  if (subscription.baseUrl === config.base_url) {
+    return subscription.topic;
+  }
+  return topicShortUrl(subscription.baseUrl, subscription.topic);
+};
+
+export const unmatchedTags = (tags) => {
+  if (!tags) return [];
+  return tags.filter((tag) => !(tag in emojisMapped));
+};
+
+export const encodeBase64 = (s) => {
+  const bytes = new TextEncoder().encode(s);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+};
+
+export const encodeBase64Url = (s) => encodeBase64(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+export const bearerAuth = (token) => `Bearer ${token}`;
+
+export const basicAuth = (username, password) => `Basic ${encodeBase64(`${username}:${password}`)}`;
+
+export const withBearerAuth = (headers, token) => ({ ...headers, Authorization: bearerAuth(token) });
+
+export const maybeWithBearerAuth = (headers, token) => {
+  if (token) {
+    return withBearerAuth(headers, token);
+  }
+  return headers;
+};
+
+export const withBasicAuth = (headers, username, password) => ({
+  ...headers,
+  Authorization: basicAuth(username, password),
+});
+
+export const maybeWithAuth = (headers, user) => {
+  if (user?.password) {
+    return withBasicAuth(headers, user.username, user.password);
+  }
+  if (user?.token) {
+    return withBearerAuth(headers, user.token);
+  }
+  return headers;
+};
+
+export const maybeActionErrors = (notification) => {
+  const actionErrors = (notification.actions ?? [])
+    .map((action) => action.error)
+    .filter((action) => !!action)
+    .join("\n");
+  if (actionErrors.length === 0) {
+    return undefined;
+  }
+  return actionErrors;
+};
+
+export const shuffle = (arr) => {
+  const returnArr = [...arr];
+
+  for (let index = returnArr.length - 1; index > 0; index -= 1) {
+    const j = Math.floor(Math.random() * (index + 1));
+    [returnArr[index], returnArr[j]] = [returnArr[j], returnArr[index]];
+  }
+
+  return returnArr;
+};
+
+export const splitNoEmpty = (s, delimiter) =>
+  s
+    .split(delimiter)
+    .map((x) => x.trim())
+    .filter((x) => x !== "");
+
+/** Non-cryptographic hash function, see https://stackoverflow.com/a/8831937/1440785 */
+export const hashCode = (s) => {
+  let hash = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    const char = s.charCodeAt(i);
+    // eslint-disable-next-line no-bitwise
+    hash = (hash << 5) - hash + char;
+    // eslint-disable-next-line no-bitwise
+    hash &= hash; // Convert to 32bit integer
+  }
+  return hash;
+};
+
+/**
+ * convert `i18n.language` style str (e.g.: `en_US`) to kebab-case (e.g.: `en-US`),
+ * which is expected by `<html lang>` and `Intl.DateTimeFormat`. Falls back to "en"
+ * if the input is missing or not a string.
+ */
+export const getKebabCaseLangStr = (language) => (typeof language === "string" && language.length > 0 ? language.replace(/_/g, "-") : "en");
+
+// Date/time display is intentionally NOT tied to the UI translation language; it follows the
+// dedicated dateFormat/timeFormat prefs (see Prefs.js). SYSTEM modes pass no locale to Intl so it
+// uses the browser's default (the user's OS region/format settings). DMY/MDY force the day/month
+// order; ISO8601 forces an unambiguous, locale-independent and always-24-hour format. The clock
+// (12h/24h) is chosen independently via timeFormat. All variants render local time.
+const pad2 = (n) => String(n).padStart(2, "0");
+
+// Per-format date builders (only ISO zero-pads; the rest drop leading zeros). The router below
+// (formatDate) picks one of these for a fixed-order format, or falls back to the browser locale.
+const formatDateIso = (date) => `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+const formatDateDmy = (date) => `${date.getDate()}/${date.getMonth() + 1}/${date.getFullYear()}`;
+const formatDateDmyDot = (date) => `${date.getDate()}.${date.getMonth() + 1}.${date.getFullYear()}`;
+const formatDateMdy = (date) => `${date.getMonth() + 1}/${date.getDate()}/${date.getFullYear()}`;
+
+// ISO date-time is always YYYY-MM-DD HH:mm (24-hour), independent of the timeFormat pref.
+const formatDateTimeIso = (date) => `${formatDateIso(date)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+
+// undefined lets the locale decide the clock; true/false force a 12- or 24-hour clock. Passing
+// hour12: undefined to Intl is equivalent to omitting it (and avoids an object spread that would
+// otherwise widen the sibling dateStyle/timeStyle string literals).
+const hour12For = (timeFormat) => {
+  if (timeFormat === TIME_FORMAT.H12) return true;
+  if (timeFormat === TIME_FORMAT.H24) return false;
+  return undefined;
+};
+
+// The date router: delegates to a fixed-order builder, or falls back to the browser locale (SYSTEM).
+export const formatDate = (timestamp, dateFormat = DATE_FORMAT.SYSTEM) => {
+  const date = new Date(timestamp * 1000);
+  switch (dateFormat) {
+    case DATE_FORMAT.ISO8601:
+      return formatDateIso(date);
+    case DATE_FORMAT.DMY:
+      return formatDateDmy(date);
+    case DATE_FORMAT.DMY_DOT:
+      return formatDateDmyDot(date);
+    case DATE_FORMAT.MDY:
+      return formatDateMdy(date);
+    default:
+      return new Intl.DateTimeFormat(undefined, { dateStyle: "short" }).format(date);
+  }
+};
+
+export const formatTime = (timestamp, timeFormat = TIME_FORMAT.SYSTEM) =>
+  new Intl.DateTimeFormat(undefined, {
+    timeStyle: "short",
+    hour12: hour12For(timeFormat),
+  }).format(new Date(timestamp * 1000));
+
+export const formatDateTime = (timestamp, dateFormat = DATE_FORMAT.SYSTEM, timeFormat = TIME_FORMAT.SYSTEM) => {
+  if (dateFormat === DATE_FORMAT.ISO8601) {
+    return formatDateTimeIso(new Date(timestamp * 1000));
+  }
+  if ([DATE_FORMAT.DMY, DATE_FORMAT.DMY_DOT, DATE_FORMAT.MDY].includes(dateFormat)) {
+    return `${formatDate(timestamp, dateFormat)} ${formatTime(timestamp, timeFormat)}`;
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "short",
+    timeStyle: "short",
+    hour12: hour12For(timeFormat),
+  }).format(new Date(timestamp * 1000));
+};
+
+// formatResetAt formats the account's stats.reset_at (unix seconds), or returns null if the server
+// does not send it (a server from before rolling daily limits)
+export const formatResetAt = (resetAt, dateFormat, timeFormat) => (resetAt ? formatDateTime(resetAt, dateFormat, timeFormat) : null);
+
+export const formatShortDuration = (ms, language) => {
+  const seconds = Math.round(ms / 1000);
+  const units = [
+    { unit: "year", s: 31536000 },
+    { unit: "month", s: 2592000 },
+    { unit: "week", s: 604800 },
+    { unit: "day", s: 86400 },
+    { unit: "hour", s: 3600 },
+    { unit: "minute", s: 60 },
+    { unit: "second", s: 1 },
+  ];
+  const match = units.find((u) => seconds >= u.s) ?? units[units.length - 1];
+  const value = Math.round(seconds / match.s);
+  // [lang, "en"] makes Intl fall back to English for well-formed-but-unsupported tags;
+  // the try/catch covers malformed tags (RangeError) so the web app never crashes here.
+  try {
+    return new Intl.NumberFormat([getKebabCaseLangStr(language), "en"], {
+      style: "unit",
+      unit: match.unit,
+      unitDisplay: "long",
+    }).format(value);
+  } catch {
+    return new Intl.NumberFormat("en", { style: "unit", unit: match.unit, unitDisplay: "long" }).format(value);
+  }
+};
+
+export const formatBytes = (bytes, decimals = 2) => {
+  if (bytes === 0) return "0 bytes";
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ["bytes", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / k ** i).toFixed(dm))} ${sizes[i]}`;
+};
+
+export const formatNumber = (n) => {
+  if (n === 0) {
+    return n;
+  }
+  if (n % 1000 === 0) {
+    return `${n / 1000}k`;
+  }
+  return n.toLocaleString();
+};
+
+export const formatPrice = (n) => {
+  if (n % 100 === 0) {
+    return `$${n / 100}`;
+  }
+  return `$${(n / 100).toPrecision(2)}`;
+};
+
+export const openUrl = (url) => {
+  window.open(url, "_blank", "noreferrer");
+};
+
+export const sounds = {
+  ding: {
+    file: ding,
+    label: "Ding",
+  },
+  juntos: {
+    file: juntos,
+    label: "Juntos",
+  },
+  pristine: {
+    file: pristine,
+    label: "Pristine",
+  },
+  dadum: {
+    file: dadum,
+    label: "Dadum",
+  },
+  pop: {
+    file: pop,
+    label: "Pop",
+  },
+  "pop-swoosh": {
+    file: popSwoosh,
+    label: "Pop swoosh",
+  },
+  beep: {
+    file: beep,
+    label: "Beep",
+  },
+};
+
+export const playSound = async (id) => {
+  const audio = new Audio(sounds[id].file);
+  return audio.play();
+};
+
+// From: https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch
+// eslint-disable-next-line func-style
+export async function* fetchLinesIterator(fileURL, headers) {
+  const utf8Decoder = new TextDecoder("utf-8");
+  const response = await fetch(fileURL, {
+    headers,
+  });
+  const reader = response.body.getReader();
+  let { value: chunk, done: readerDone } = await reader.read();
+  chunk = chunk ? utf8Decoder.decode(chunk) : "";
+
+  const re = /\n|\r|\r\n/gm;
+  let startIndex = 0;
+
+  for (;;) {
+    const result = re.exec(chunk);
+    if (!result) {
+      if (readerDone) {
+        break;
+      }
+      const remainder = chunk.substr(startIndex);
+      // eslint-disable-next-line no-await-in-loop
+      ({ value: chunk, done: readerDone } = await reader.read());
+      chunk = remainder + (chunk ? utf8Decoder.decode(chunk) : "");
+      startIndex = 0;
+      re.lastIndex = 0;
+      // eslint-disable-next-line no-continue
+      continue;
+    }
+    yield chunk.substring(startIndex, result.index);
+    startIndex = re.lastIndex;
+  }
+  if (startIndex < chunk.length) {
+    yield chunk.substr(startIndex); // last line didn't end in a newline char
+  }
+}
+
+export const randomAlphanumericString = (len) => {
+  const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let id = "";
+  for (let i = 0; i < len; i += 1) {
+    // eslint-disable-next-line no-bitwise
+    id += alphabet[(Math.random() * alphabet.length) | 0];
+  }
+  return id;
+};
+
+export const urlB64ToUint8Array = (base64String) => {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+
+  for (let i = 0; i < rawData.length; i += 1) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+};
+
+export const darkModeEnabled = (prefersDarkMode, themePreference) => {
+  switch (themePreference) {
+    case THEME.DARK:
+      return true;
+
+    case THEME.LIGHT:
+      return false;
+
+    case THEME.SYSTEM:
+    default:
+      return prefersDarkMode;
+  }
+};
+
+// Canvas-based favicon with a red notification dot when there are unread messages
+let faviconCanvas;
+let faviconOriginalIcon;
+
+const loadFaviconIcon = () =>
+  new Promise((resolve) => {
+    if (faviconOriginalIcon) {
+      resolve(faviconOriginalIcon);
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      faviconOriginalIcon = img;
+      resolve(img);
+    };
+    img.onerror = () => resolve(null);
+    // Use PNG instead of ICO — .ico files can't be reliably drawn to canvas in all browsers
+    img.src = "/static/images/ntfy.png";
+  });
+
+export const updateFavicon = async (count) => {
+  const size = 32;
+  const img = await loadFaviconIcon();
+  if (!img) {
+    return;
+  }
+
+  if (!faviconCanvas) {
+    faviconCanvas = document.createElement("canvas");
+    faviconCanvas.width = size;
+    faviconCanvas.height = size;
+  }
+
+  const ctx = faviconCanvas.getContext("2d");
+  ctx.clearRect(0, 0, size, size);
+  ctx.drawImage(img, 0, 0, size, size);
+
+  if (count > 0) {
+    const dotRadius = 5;
+    const borderWidth = 2;
+    const dotX = size - dotRadius - borderWidth + 1;
+    const dotY = size - dotRadius - borderWidth + 1;
+
+    // Transparent border: erase a ring around the dot so the icon doesn't bleed into it
+    ctx.save();
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.beginPath();
+    ctx.arc(dotX, dotY, dotRadius + borderWidth, 0, 2 * Math.PI);
+    ctx.fill();
+    ctx.restore();
+
+    // Red dot
+    ctx.beginPath();
+    ctx.arc(dotX, dotY, dotRadius, 0, 2 * Math.PI);
+    ctx.fillStyle = "#dc3545";
+    ctx.fill();
+  }
+
+  const link = document.querySelector("link[rel='icon']");
+  if (link) {
+    link.href = faviconCanvas.toDataURL("image/png");
+  }
+};
+
+// Matches a URL whose scheme is NOT in the safe list (https, mailto, ...). A scheme
+// (RFC 3986: [a-z][a-z0-9+.-]*) can't contain a slash, query, or hash, so a colon later
+// in the path/query (e.g. foo?x=a:b) is never mistaken for a protocol separator. Relative
+// URLs have no scheme and never match. This strips javascript:/data:/vbscript:/... so React
+// never has to block a javascript: URL at render time -- which it does loudly, throwing an
+// uncaught error.
+const unsafeUrlProtocol = /^\s*(?!(?:https?|ftps?|ircs?|mailto|xmpp|tel):)[a-z][a-z0-9+.-]*:/i;
+
+// Returns the URL unchanged if it uses a safe protocol or is relative, otherwise "".
+export const sanitizeUrl = (url) => (url && unsafeUrlProtocol.test(url) ? "" : url || "");
+
+export const copyToClipboard = (text) => {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  // Fallback to the older method if clipboard API is not supported (or on HTTP)
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", ""); // Avoid mobile keyboards from popping up
+  textarea.style.position = "fixed"; // Avoid scroll jump
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
+  return Promise.resolve();
+};

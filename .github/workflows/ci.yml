@@ -1,0 +1,35 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ntfy-rs:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: |
+          docker run --rm ntfy-rs:test --version
+          docker run -d --name ntfy-rs -p 8080:8080 -e NTFY_BASE_URL=https://ntfy.aosn.de ntfy-rs:test
+          python3 scripts/smoke.py http://127.0.0.1:8080

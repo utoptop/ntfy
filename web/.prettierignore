@@ -1,0 +1,7 @@
+build/
+dist/
+public/static/langs/
+src/app/emojis.js
+src/app/emojisMapped.js
+test-results/
+playwright-report/

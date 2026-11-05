@@ -1,0 +1,858 @@
+import * as React from "react";
+import { useContext, useEffect, useState } from "react";
+import {
+  Alert,
+  Box,
+  CardActions,
+  CardContent,
+  Chip,
+  FormControl,
+  Select,
+  Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
+  Tooltip,
+  useMediaQuery,
+  Typography,
+  IconButton,
+  Container,
+  TextField,
+  MenuItem,
+  Card,
+  Button,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  useTheme,
+} from "@mui/material";
+import EditIcon from "@mui/icons-material/Edit";
+import CloseIcon from "@mui/icons-material/Close";
+import PlayArrowIcon from "@mui/icons-material/PlayArrow";
+import { useLiveQuery } from "dexie-react-hooks";
+import { useTranslation } from "react-i18next";
+import Info from "@mui/icons-material/Info";
+import { useOutletContext } from "react-router-dom";
+import userManager from "../app/UserManager";
+import { formatDate, formatTime, playSound, shortUrl, shuffle, sounds, validUrl } from "../app/utils";
+import session from "../app/Session";
+import routes from "./routes";
+import accountApi, { Permission, Role } from "../app/AccountApi";
+import { Pref, PrefGroup } from "./Pref";
+import AccountContext from "./AccountContext";
+import { Paragraph } from "./styles";
+import prefs, { THEME, DATE_FORMAT, TIME_FORMAT } from "../app/Prefs";
+import { PermissionDenyAll, PermissionRead, PermissionReadWrite, PermissionWrite } from "./ReserveIcons";
+import { ReserveAddDialog, ReserveDeleteDialog, ReserveEditDialog } from "./ReserveDialogs";
+import { UnauthorizedError } from "../app/errors";
+import { subscribeTopic } from "./SubscribeDialog";
+import notifier from "../app/Notifier";
+import { useIsLaunchedPWA, useNotificationPermissionListener } from "./hooks";
+import { usePrefCache } from "./PrefCache";
+
+const maybeUpdateAccountSettings = async (payload) => {
+  if (!session.exists()) {
+    return;
+  }
+  try {
+    await accountApi.updateSettings(payload);
+  } catch (e) {
+    console.log(`[Preferences] Error updating account settings`, e);
+    if (e instanceof UnauthorizedError) {
+      await session.resetAndRedirect(routes.login);
+    }
+  }
+};
+
+const Preferences = () => (
+  <Container maxWidth="md" sx={{ marginTop: 3, marginBottom: 3 }}>
+    <Stack spacing={3}>
+      <Notifications />
+      <Reservations />
+      <Users />
+      <Appearance />
+    </Stack>
+  </Container>
+);
+
+const Notifications = () => {
+  const { t } = useTranslation();
+  const isLaunchedPWA = useIsLaunchedPWA();
+  const pushPossible = useNotificationPermissionListener(() => notifier.pushPossible());
+
+  return (
+    <Card sx={{ p: 3 }} aria-label={t("prefs_notifications_title")}>
+      <Typography variant="h5" sx={{ marginBottom: 2 }}>
+        {t("prefs_notifications_title")}
+      </Typography>
+      <PrefGroup>
+        <Sound />
+        <MinPriority />
+        <DeleteAfter />
+        {!isLaunchedPWA && pushPossible && <WebPushEnabled />}
+      </PrefGroup>
+    </Card>
+  );
+};
+
+const Sound = () => {
+  const { t } = useTranslation();
+  const labelId = "prefSound";
+  const { sound } = usePrefCache();
+  const handleChange = async (ev) => {
+    await prefs.setSound(ev.target.value);
+    await maybeUpdateAccountSettings({
+      notification: {
+        sound: ev.target.value,
+      },
+    });
+  };
+  let description;
+  if (sound === "none") {
+    description = t("prefs_notifications_sound_description_none");
+  } else {
+    description = t("prefs_notifications_sound_description_some", {
+      sound: sounds[sound].label,
+    });
+  }
+  return (
+    <Pref labelId={labelId} title={t("prefs_notifications_sound_title")} description={description}>
+      <div style={{ display: "flex", width: "100%" }}>
+        <FormControl fullWidth variant="standard" sx={{ margin: 1 }}>
+          <Select value={sound} onChange={handleChange} aria-labelledby={labelId}>
+            <MenuItem value="none">{t("prefs_notifications_sound_no_sound")}</MenuItem>
+            {Object.entries(sounds).map((s) => (
+              <MenuItem key={s[0]} value={s[0]}>
+                {s[1].label}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+        <IconButton onClick={() => playSound(sound)} disabled={sound === "none"} aria-label={t("prefs_notifications_sound_play")}>
+          <PlayArrowIcon />
+        </IconButton>
+      </div>
+    </Pref>
+  );
+};
+
+const MinPriority = () => {
+  const { t } = useTranslation();
+  const labelId = "prefMinPriority";
+  const { minPriority } = usePrefCache();
+  const handleChange = async (ev) => {
+    await prefs.setMinPriority(ev.target.value);
+    await maybeUpdateAccountSettings({
+      notification: {
+        min_priority: ev.target.value,
+      },
+    });
+  };
+  const priorities = {
+    1: t("priority_min"),
+    2: t("priority_low"),
+    3: t("priority_default"),
+    4: t("priority_high"),
+    5: t("priority_max"),
+  };
+  let description;
+  if (minPriority === 1) {
+    description = t("prefs_notifications_min_priority_description_any");
+  } else if (minPriority === 5) {
+    description = t("prefs_notifications_min_priority_description_max");
+  } else {
+    description = t("prefs_notifications_min_priority_description_x_or_higher", {
+      number: minPriority,
+      name: priorities[minPriority],
+    });
+  }
+  return (
+    <Pref labelId={labelId} title={t("prefs_notifications_min_priority_title")} description={description}>
+      <FormControl fullWidth variant="standard" sx={{ m: 1 }}>
+        <Select value={minPriority} onChange={handleChange} aria-labelledby={labelId}>
+          <MenuItem value={1}>{t("prefs_notifications_min_priority_any")}</MenuItem>
+          <MenuItem value={2}>{t("prefs_notifications_min_priority_low_and_higher")}</MenuItem>
+          <MenuItem value={3}>{t("prefs_notifications_min_priority_default_and_higher")}</MenuItem>
+          <MenuItem value={4}>{t("prefs_notifications_min_priority_high_and_higher")}</MenuItem>
+          <MenuItem value={5}>{t("prefs_notifications_min_priority_max_only")}</MenuItem>
+        </Select>
+      </FormControl>
+    </Pref>
+  );
+};
+
+const DeleteAfter = () => {
+  const { t } = useTranslation();
+  const labelId = "prefDeleteAfter";
+  const { deleteAfter } = usePrefCache();
+  const handleChange = async (ev) => {
+    await prefs.setDeleteAfter(ev.target.value);
+    await maybeUpdateAccountSettings({
+      notification: {
+        delete_after: ev.target.value,
+      },
+    });
+  };
+
+  const description = (() => {
+    switch (deleteAfter) {
+      case 0:
+        return t("prefs_notifications_delete_after_never_description");
+      case 10800:
+        return t("prefs_notifications_delete_after_three_hours_description");
+      case 86400:
+        return t("prefs_notifications_delete_after_one_day_description");
+      case 604800:
+        return t("prefs_notifications_delete_after_one_week_description");
+      case 2592000:
+        return t("prefs_notifications_delete_after_one_month_description");
+      default:
+        return "";
+    }
+  })();
+
+  return (
+    <Pref labelId={labelId} title={t("prefs_notifications_delete_after_title")} description={description}>
+      <FormControl fullWidth variant="standard" sx={{ m: 1 }}>
+        <Select value={deleteAfter} onChange={handleChange} aria-labelledby={labelId}>
+          <MenuItem value={0}>{t("prefs_notifications_delete_after_never")}</MenuItem>
+          <MenuItem value={10800}>{t("prefs_notifications_delete_after_three_hours")}</MenuItem>
+          <MenuItem value={86400}>{t("prefs_notifications_delete_after_one_day")}</MenuItem>
+          <MenuItem value={604800}>{t("prefs_notifications_delete_after_one_week")}</MenuItem>
+          <MenuItem value={2592000}>{t("prefs_notifications_delete_after_one_month")}</MenuItem>
+        </Select>
+      </FormControl>
+    </Pref>
+  );
+};
+
+// Shows the resolved/sample value of an option (the current system mode, or a date/time sample) in muted gray.
+const FormatExample = ({ children }) => (
+  <Box component="span" sx={{ color: "text.secondary", ml: 1 }}>
+    {children}
+  </Box>
+);
+
+const Theme = () => {
+  const { t } = useTranslation();
+  const labelId = "prefTheme";
+  const { theme } = usePrefCache();
+  const prefersDarkMode = useMediaQuery("(prefers-color-scheme: dark)");
+  const handleChange = async (ev) => {
+    await prefs.setTheme(ev.target.value);
+  };
+
+  return (
+    <Pref labelId={labelId} title={t("prefs_appearance_theme_title")}>
+      <FormControl fullWidth variant="standard" sx={{ m: 1 }}>
+        <Select value={theme} onChange={handleChange} aria-labelledby={labelId}>
+          <MenuItem value={THEME.SYSTEM}>
+            {t("prefs_system_default")}
+            <FormatExample>{prefersDarkMode ? t("prefs_appearance_theme_dark") : t("prefs_appearance_theme_light")}</FormatExample>
+          </MenuItem>
+          <MenuItem value={THEME.DARK}>{t("prefs_appearance_theme_dark")}</MenuItem>
+          <MenuItem value={THEME.LIGHT}>{t("prefs_appearance_theme_light")}</MenuItem>
+        </Select>
+      </FormControl>
+    </Pref>
+  );
+};
+
+// An unambiguous sample (April 26, 2:30 PM, current year) used for each option's example: the day
+// (26) is too large to be a month, so the day/month order is unmistakable, and 14:30 distinguishes
+// the 12h/24h clock. Using today's date could be ambiguous (e.g. when the day could pass for a month).
+const EXAMPLE_TIMESTAMP = Math.round(new Date(new Date().getFullYear(), 3, 26, 14, 30).getTime() / 1000);
+
+const DateFormat = () => {
+  const { t } = useTranslation();
+  const labelId = "prefDateFormat";
+  const { dateFormat } = usePrefCache();
+  const handleChange = async (ev) => {
+    await prefs.setDateFormat(ev.target.value);
+    await maybeUpdateAccountSettings({ date_format: ev.target.value });
+  };
+
+  return (
+    <Pref labelId={labelId} title={t("prefs_appearance_date_format_title")}>
+      <FormControl fullWidth variant="standard" sx={{ m: 1 }}>
+        <Select value={dateFormat} onChange={handleChange} aria-labelledby={labelId}>
+          <MenuItem value={DATE_FORMAT.SYSTEM}>
+            {t("prefs_system_default")}
+            <FormatExample>{formatDate(EXAMPLE_TIMESTAMP, DATE_FORMAT.SYSTEM)}</FormatExample>
+          </MenuItem>
+          <MenuItem value={DATE_FORMAT.ISO8601}>
+            {t("prefs_appearance_date_format_iso8601")}
+            <FormatExample>{formatDate(EXAMPLE_TIMESTAMP, DATE_FORMAT.ISO8601)}</FormatExample>
+          </MenuItem>
+          <MenuItem value={DATE_FORMAT.DMY}>
+            {t("prefs_appearance_date_format_dmy")}
+            <FormatExample>{formatDate(EXAMPLE_TIMESTAMP, DATE_FORMAT.DMY)}</FormatExample>
+          </MenuItem>
+          <MenuItem value={DATE_FORMAT.DMY_DOT}>
+            {t("prefs_appearance_date_format_dmy_dot")}
+            <FormatExample>{formatDate(EXAMPLE_TIMESTAMP, DATE_FORMAT.DMY_DOT)}</FormatExample>
+          </MenuItem>
+          <MenuItem value={DATE_FORMAT.MDY}>
+            {t("prefs_appearance_date_format_mdy")}
+            <FormatExample>{formatDate(EXAMPLE_TIMESTAMP, DATE_FORMAT.MDY)}</FormatExample>
+          </MenuItem>
+        </Select>
+      </FormControl>
+    </Pref>
+  );
+};
+
+const TimeFormat = () => {
+  const { t } = useTranslation();
+  const labelId = "prefTimeFormat";
+  const { timeFormat, dateFormat } = usePrefCache();
+  // ISO 8601 dates are always 24-hour, so the clock choice is fixed while it's selected. Disable the
+  // control and show 24-hour, but leave the stored pref untouched so it returns for other date formats.
+  const fixedTo24h = dateFormat === DATE_FORMAT.ISO8601;
+  const handleChange = async (ev) => {
+    await prefs.setTimeFormat(ev.target.value);
+    await maybeUpdateAccountSettings({ time_format: ev.target.value });
+  };
+
+  return (
+    <Pref labelId={labelId} title={t("prefs_appearance_time_format_title")}>
+      <FormControl fullWidth variant="standard" sx={{ m: 1 }}>
+        <Select value={fixedTo24h ? TIME_FORMAT.H24 : timeFormat} onChange={handleChange} disabled={fixedTo24h} aria-labelledby={labelId}>
+          <MenuItem value={TIME_FORMAT.SYSTEM}>
+            {t("prefs_system_default")}
+            <FormatExample>{formatTime(EXAMPLE_TIMESTAMP, TIME_FORMAT.SYSTEM)}</FormatExample>
+          </MenuItem>
+          <MenuItem value={TIME_FORMAT.H12}>
+            {t("prefs_appearance_time_format_12h")}
+            <FormatExample>{formatTime(EXAMPLE_TIMESTAMP, TIME_FORMAT.H12)}</FormatExample>
+          </MenuItem>
+          <MenuItem value={TIME_FORMAT.H24}>
+            {t("prefs_appearance_time_format_24h")}
+            <FormatExample>{formatTime(EXAMPLE_TIMESTAMP, TIME_FORMAT.H24)}</FormatExample>
+          </MenuItem>
+        </Select>
+      </FormControl>
+    </Pref>
+  );
+};
+
+const WebPushEnabled = () => {
+  const { t } = useTranslation();
+  const labelId = "prefWebPushEnabled";
+  const { webPushEnabled: enabled } = usePrefCache();
+  const handleChange = async (ev) => {
+    await prefs.setWebPushEnabled(ev.target.value);
+  };
+
+  return (
+    <Pref
+      labelId={labelId}
+      title={t("prefs_notifications_web_push_title")}
+      description={enabled ? t("prefs_notifications_web_push_enabled_description") : t("prefs_notifications_web_push_disabled_description")}
+    >
+      <FormControl fullWidth variant="standard" sx={{ m: 1 }}>
+        <Select value={enabled ?? false} onChange={handleChange} aria-labelledby={labelId}>
+          <MenuItem value>{t("prefs_notifications_web_push_enabled", { server: shortUrl(config.base_url) })}</MenuItem>
+          <MenuItem value={false}>{t("prefs_notifications_web_push_disabled")}</MenuItem>
+        </Select>
+      </FormControl>
+    </Pref>
+  );
+};
+
+const Users = () => {
+  const { t } = useTranslation();
+  const [dialogKey, setDialogKey] = useState(0);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const users = useLiveQuery(() => userManager.all());
+  const handleAddClick = () => {
+    setDialogKey((prev) => prev + 1);
+    setDialogOpen(true);
+  };
+  const handleDialogCancel = () => {
+    setDialogOpen(false);
+  };
+  const handleDialogSubmit = async (user) => {
+    setDialogOpen(false);
+    try {
+      await userManager.save(user);
+      console.debug(`[Preferences] User ${user.username} for ${user.baseUrl} added`);
+    } catch (e) {
+      console.log(`[Preferences] Error adding user.`, e);
+    }
+  };
+  return (
+    <Card sx={{ padding: 1 }} aria-label={t("prefs_users_title")}>
+      <CardContent sx={{ paddingBottom: 1 }}>
+        <Typography variant="h5" sx={{ marginBottom: 2 }}>
+          {t("prefs_users_title")}
+        </Typography>
+        <Paragraph>
+          {t("prefs_users_description")}
+          {session.exists() && <>{` ${t("prefs_users_description_no_sync")}`}</>}
+        </Paragraph>
+        {users?.length > 0 && <UserTable users={users} />}
+      </CardContent>
+      <CardActions>
+        <Button onClick={handleAddClick}>{t("prefs_users_add_button")}</Button>
+        <UserDialog
+          key={`userAddDialog${dialogKey}`}
+          open={dialogOpen}
+          user={null}
+          users={users}
+          onCancel={handleDialogCancel}
+          onSubmit={handleDialogSubmit}
+        />
+      </CardActions>
+    </Card>
+  );
+};
+
+const UserTable = (props) => {
+  const { t } = useTranslation();
+  const [dialogKey, setDialogKey] = useState(0);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogUser, setDialogUser] = useState(null);
+
+  const handleEditClick = (user) => {
+    setDialogKey((prev) => prev + 1);
+    setDialogUser(user);
+    setDialogOpen(true);
+  };
+
+  const handleDialogCancel = () => {
+    setDialogOpen(false);
+  };
+
+  const handleDialogSubmit = async (user) => {
+    setDialogOpen(false);
+    try {
+      await userManager.save(user);
+      console.debug(`[Preferences] User ${user.username} for ${user.baseUrl} updated`);
+    } catch (e) {
+      console.log(`[Preferences] Error updating user.`, e);
+    }
+  };
+
+  const handleDeleteClick = async (user) => {
+    try {
+      await userManager.delete(user.baseUrl);
+      console.debug(`[Preferences] User ${user.username} for ${user.baseUrl} deleted`);
+    } catch (e) {
+      console.error(`[Preferences] Error deleting user for ${user.baseUrl}`, e);
+    }
+  };
+
+  return (
+    <Table size="small" aria-label={t("prefs_users_table")}>
+      <TableHead>
+        <TableRow>
+          <TableCell sx={{ paddingLeft: 0 }}>{t("prefs_users_table_user_header")}</TableCell>
+          <TableCell>{t("prefs_users_table_base_url_header")}</TableCell>
+          <TableCell />
+        </TableRow>
+      </TableHead>
+      <TableBody>
+        {props.users?.map((user) => (
+          <TableRow key={user.baseUrl} sx={{ "&:last-child td, &:last-child th": { border: 0 } }}>
+            <TableCell component="th" scope="row" sx={{ paddingLeft: 0 }} aria-label={t("prefs_users_table_user_header")}>
+              {user.username}
+            </TableCell>
+            <TableCell aria-label={t("prefs_users_table_base_url_header")}>{user.baseUrl}</TableCell>
+            <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
+              {(!session.exists() || user.baseUrl !== config.base_url) && (
+                <>
+                  <Tooltip title={t("prefs_users_edit_button")}>
+                    <IconButton onClick={() => handleEditClick(user)} aria-label={t("prefs_users_edit_button")}>
+                      <EditIcon />
+                    </IconButton>
+                  </Tooltip>
+                  <Tooltip title={t("prefs_users_delete_button")}>
+                    <IconButton onClick={() => handleDeleteClick(user)} aria-label={t("prefs_users_delete_button")}>
+                      <CloseIcon />
+                    </IconButton>
+                  </Tooltip>
+                </>
+              )}
+              {session.exists() && user.baseUrl === config.base_url && (
+                <Tooltip title={t("prefs_users_table_cannot_delete_or_edit")}>
+                  <span>
+                    <IconButton disabled>
+                      <EditIcon />
+                    </IconButton>
+                    <IconButton disabled>
+                      <CloseIcon />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+              )}
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+      <UserDialog
+        key={`userEditDialog${dialogKey}`}
+        open={dialogOpen}
+        user={dialogUser}
+        users={props.users}
+        onCancel={handleDialogCancel}
+        onSubmit={handleDialogSubmit}
+      />
+    </Table>
+  );
+};
+
+const UserDialog = (props) => {
+  const theme = useTheme();
+  const { t } = useTranslation();
+  const [baseUrl, setBaseUrl] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const fullScreen = useMediaQuery(theme.breakpoints.down("sm"));
+  const editMode = props.user !== null;
+  const baseUrlValid = baseUrl.length === 0 || validUrl(baseUrl);
+  const baseUrlExists = props.users?.map((user) => user.baseUrl).includes(baseUrl);
+  const baseUrlError = baseUrl.length > 0 && (!baseUrlValid || baseUrlExists);
+  const addButtonEnabled = (() => {
+    if (editMode) {
+      return username.length > 0 && password.length > 0;
+    }
+    return validUrl(baseUrl) && !baseUrlExists && username.length > 0 && password.length > 0;
+  })();
+  const baseUrlHelperText = (() => {
+    if (baseUrl.length > 0 && !baseUrlValid) {
+      return t("prefs_users_dialog_base_url_invalid");
+    }
+    if (baseUrlExists) {
+      return t("prefs_users_dialog_base_url_exists");
+    }
+    return "";
+  })();
+  const handleSubmit = async () => {
+    props.onSubmit({
+      baseUrl,
+      username,
+      password,
+    });
+  };
+  useEffect(() => {
+    if (editMode) {
+      setBaseUrl(props.user.baseUrl);
+      setUsername(props.user.username);
+      setPassword(props.user.password);
+    }
+  }, [editMode, props.user]);
+  return (
+    <Dialog open={props.open} onClose={props.onCancel} fullScreen={fullScreen}>
+      <DialogTitle>{editMode ? t("prefs_users_dialog_title_edit") : t("prefs_users_dialog_title_add")}</DialogTitle>
+      <DialogContent>
+        {!editMode && (
+          <TextField
+            autoFocus
+            margin="dense"
+            id="baseUrl"
+            label={t("prefs_users_dialog_base_url_label")}
+            aria-label={t("prefs_users_dialog_base_url_label")}
+            value={baseUrl}
+            onChange={(ev) => setBaseUrl(ev.target.value)}
+            type="url"
+            fullWidth
+            variant="standard"
+            error={baseUrlError}
+            helperText={baseUrlHelperText}
+          />
+        )}
+        <TextField
+          autoFocus={editMode}
+          margin="dense"
+          id="username"
+          label={t("prefs_users_dialog_username_label")}
+          aria-label={t("prefs_users_dialog_username_label")}
+          value={username}
+          onChange={(ev) => setUsername(ev.target.value)}
+          type="text"
+          fullWidth
+          variant="standard"
+        />
+        <TextField
+          margin="dense"
+          id="password"
+          label={t("prefs_users_dialog_password_label")}
+          aria-label={t("prefs_users_dialog_password_label")}
+          type="password"
+          value={password}
+          onChange={(ev) => setPassword(ev.target.value)}
+          fullWidth
+          variant="standard"
+        />
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={props.onCancel}>{t("common_cancel")}</Button>
+        <Button onClick={handleSubmit} disabled={!addButtonEnabled}>
+          {editMode ? t("common_save") : t("common_add")}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
+const Appearance = () => {
+  const { t } = useTranslation();
+  return (
+    <Card sx={{ p: 3 }} aria-label={t("prefs_appearance_title")}>
+      <Typography variant="h5" sx={{ marginBottom: 2 }}>
+        {t("prefs_appearance_title")}
+      </Typography>
+      <PrefGroup>
+        <Theme />
+        <DateFormat />
+        <TimeFormat />
+        <Language />
+      </PrefGroup>
+    </Card>
+  );
+};
+
+const Language = () => {
+  const { t, i18n } = useTranslation();
+  const labelId = "prefLanguage";
+  const lang = i18n.resolvedLanguage ?? "en";
+
+  // Country flags are displayed using emoji. Emoji rendering is handled by platform fonts.
+  // Windows in particular does not yet play nicely with flag emoji so for now, hide flags on Windows.
+  const randomFlags = shuffle([
+    "🇬🇧",
+    "🇺🇸",
+    "🇪🇸",
+    "🇫🇷",
+    "🇧🇬",
+    "🇨🇿",
+    "🇩🇪",
+    "🇵🇱",
+    "🇺🇦",
+    "🇨🇳",
+    "🇮🇹",
+    "🇭🇺",
+    "🇧🇷",
+    "🇳🇱",
+    "🇮🇩",
+    "🇯🇵",
+    "🇷🇺",
+    "🇹🇷",
+    "🇫🇮",
+  ]).slice(0, 3);
+  const showFlags = !navigator.userAgent.includes("Windows");
+  let title = t("prefs_appearance_language_title");
+  if (showFlags) {
+    title += ` ${randomFlags.join(" ")}`;
+  }
+
+  const handleChange = async (ev) => {
+    await i18n.changeLanguage(ev.target.value);
+    await maybeUpdateAccountSettings({
+      language: ev.target.value,
+    });
+  };
+
+  // Remember: Flags are not languages. Don't put flags next to the language in the list.
+  // Languages names from: https://www.omniglot.com/language/names.htm
+  // Better: Sidebar in Wikipedia: https://en.wikipedia.org/wiki/Bokm%C3%A5l
+
+  return (
+    <Pref labelId={labelId} title={title}>
+      <FormControl fullWidth variant="standard" sx={{ m: 1 }}>
+        <Select value={lang} onChange={handleChange} aria-labelledby={labelId}>
+          <MenuItem value="en">English</MenuItem>
+          <MenuItem value="ar">العربية</MenuItem>
+          <MenuItem value="id">Bahasa Indonesia</MenuItem>
+          <MenuItem value="bg">Български</MenuItem>
+          <MenuItem value="cs">Čeština</MenuItem>
+          <MenuItem value="zh_Hant">繁體中文</MenuItem>
+          <MenuItem value="zh_Hans">简体中文</MenuItem>
+          <MenuItem value="da">Dansk</MenuItem>
+          <MenuItem value="de">Deutsch</MenuItem>
+          <MenuItem value="et">Eesti</MenuItem>
+          <MenuItem value="es">Español</MenuItem>
+          <MenuItem value="fr">Français</MenuItem>
+          <MenuItem value="gl">Galego</MenuItem>
+          <MenuItem value="it">Italiano</MenuItem>
+          <MenuItem value="hu">Magyar</MenuItem>
+          <MenuItem value="ko">한국어</MenuItem>
+          <MenuItem value="ja">日本語</MenuItem>
+          <MenuItem value="nl">Nederlands</MenuItem>
+          <MenuItem value="nb_NO">Norsk bokmål</MenuItem>
+          <MenuItem value="uk">Українська</MenuItem>
+          <MenuItem value="pt">Português</MenuItem>
+          <MenuItem value="pt_BR">Português (Brasil)</MenuItem>
+          <MenuItem value="pl">Polski</MenuItem>
+          <MenuItem value="ru">Русский</MenuItem>
+          <MenuItem value="ro">Română</MenuItem>
+          <MenuItem value="sk">Slovenčina</MenuItem>
+          <MenuItem value="fi">Suomi</MenuItem>
+          <MenuItem value="sv">Svenska</MenuItem>
+          <MenuItem value="tr">Türkçe</MenuItem>
+          <MenuItem value="ta">தமிழ்</MenuItem>
+        </Select>
+      </FormControl>
+    </Pref>
+  );
+};
+
+const Reservations = () => {
+  const { t } = useTranslation();
+  const { account } = useContext(AccountContext);
+  const [dialogKey, setDialogKey] = useState(0);
+  const [dialogOpen, setDialogOpen] = useState(false);
+
+  if (!config.enable_reservations || !session.exists() || !account) {
+    return <></>;
+  }
+  const reservations = account.reservations || [];
+  const limitReached = account.role === Role.USER && account.stats.reservations_remaining === 0;
+
+  const handleAddClick = () => {
+    setDialogKey((prev) => prev + 1);
+    setDialogOpen(true);
+  };
+
+  return (
+    <Card sx={{ padding: 1 }} aria-label={t("prefs_reservations_title")}>
+      <CardContent sx={{ paddingBottom: 1 }}>
+        <Typography variant="h5" sx={{ marginBottom: 2 }}>
+          {t("prefs_reservations_title")}
+        </Typography>
+        <Paragraph>{t("prefs_reservations_description")}</Paragraph>
+        {reservations.length > 0 && <ReservationsTable reservations={reservations} />}
+        {limitReached && <Alert severity="info">{t("prefs_reservations_limit_reached")}</Alert>}
+      </CardContent>
+      <CardActions>
+        <Button onClick={handleAddClick} disabled={limitReached}>
+          {t("prefs_reservations_add_button")}
+        </Button>
+        <ReserveAddDialog
+          key={`reservationAddDialog${dialogKey}`}
+          open={dialogOpen}
+          reservations={reservations}
+          onClose={() => setDialogOpen(false)}
+        />
+      </CardActions>
+    </Card>
+  );
+};
+
+const ReservationsTable = (props) => {
+  const { t } = useTranslation();
+  const [dialogKey, setDialogKey] = useState(0);
+  const [dialogReservation, setDialogReservation] = useState(null);
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const { subscriptions } = useOutletContext();
+  const localSubscriptions =
+    subscriptions?.length > 0
+      ? Object.assign({}, ...subscriptions.filter((s) => s.baseUrl === config.base_url).map((s) => ({ [s.topic]: s })))
+      : {};
+
+  const handleEditClick = (reservation) => {
+    setDialogKey((prev) => prev + 1);
+    setDialogReservation(reservation);
+    setEditDialogOpen(true);
+  };
+
+  const handleDeleteClick = async (reservation) => {
+    setDialogKey((prev) => prev + 1);
+    setDialogReservation(reservation);
+    setDeleteDialogOpen(true);
+  };
+
+  const handleSubscribeClick = async (reservation) => {
+    await subscribeTopic(config.base_url, reservation.topic, {});
+  };
+
+  return (
+    <Table size="small" aria-label={t("prefs_reservations_table")}>
+      <TableHead>
+        <TableRow>
+          <TableCell sx={{ paddingLeft: 0 }}>{t("prefs_reservations_table_topic_header")}</TableCell>
+          <TableCell>{t("prefs_reservations_table_access_header")}</TableCell>
+          <TableCell />
+        </TableRow>
+      </TableHead>
+      <TableBody>
+        {props.reservations.map((reservation) => (
+          <TableRow key={reservation.topic} sx={{ "&:last-child td, &:last-child th": { border: 0 } }}>
+            <TableCell component="th" scope="row" sx={{ paddingLeft: 0 }} aria-label={t("prefs_reservations_table_topic_header")}>
+              {reservation.topic}
+            </TableCell>
+            <TableCell aria-label={t("prefs_reservations_table_access_header")}>
+              {reservation.everyone === Permission.READ_WRITE && (
+                <>
+                  <PermissionReadWrite size="small" sx={{ verticalAlign: "bottom", mr: 1.5 }} />
+                  {t("prefs_reservations_table_everyone_read_write")}
+                </>
+              )}
+              {reservation.everyone === Permission.READ_ONLY && (
+                <>
+                  <PermissionRead size="small" sx={{ verticalAlign: "bottom", mr: 1.5 }} />
+                  {t("prefs_reservations_table_everyone_read_only")}
+                </>
+              )}
+              {reservation.everyone === Permission.WRITE_ONLY && (
+                <>
+                  <PermissionWrite size="small" sx={{ verticalAlign: "bottom", mr: 1.5 }} />
+                  {t("prefs_reservations_table_everyone_write_only")}
+                </>
+              )}
+              {reservation.everyone === Permission.DENY_ALL && (
+                <>
+                  <PermissionDenyAll size="small" sx={{ verticalAlign: "bottom", mr: 1.5 }} />
+                  {t("prefs_reservations_table_everyone_deny_all")}
+                </>
+              )}
+            </TableCell>
+            <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
+              {!localSubscriptions[reservation.topic] && (
+                <Tooltip title={t("prefs_reservations_table_click_to_subscribe")}>
+                  <Chip
+                    icon={<Info />}
+                    onClick={() => handleSubscribeClick(reservation)}
+                    label={t("prefs_reservations_table_not_subscribed")}
+                    color="primary"
+                    variant="outlined"
+                  />
+                </Tooltip>
+              )}
+              <Tooltip title={t("prefs_reservations_edit_button")}>
+                <IconButton onClick={() => handleEditClick(reservation)} aria-label={t("prefs_reservations_edit_button")}>
+                  <EditIcon />
+                </IconButton>
+              </Tooltip>
+              <Tooltip title={t("prefs_reservations_delete_button")}>
+                <IconButton onClick={() => handleDeleteClick(reservation)} aria-label={t("prefs_reservations_delete_button")}>
+                  <CloseIcon />
+                </IconButton>
+              </Tooltip>
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+      <ReserveEditDialog
+        key={`reservationEditDialog${dialogKey}`}
+        open={editDialogOpen}
+        reservation={dialogReservation}
+        reservations={props.reservations}
+        onClose={() => setEditDialogOpen(false)}
+      />
+      <ReserveDeleteDialog
+        key={`reservationDeleteDialog${dialogKey}`}
+        open={deleteDialogOpen}
+        topic={dialogReservation?.topic}
+        onClose={() => setDeleteDialogOpen(false)}
+      />
+    </Table>
+  );
+};
+
+export default Preferences;

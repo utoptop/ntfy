@@ -1,0 +1,12 @@
+/target/
+/data/
+*.db
+*.db-shm
+*.db-wal
+.env
+server.local.yml
+/web/node_modules/
+/web/build/
+/bench-results/
+__pycache__/
+*.pyc

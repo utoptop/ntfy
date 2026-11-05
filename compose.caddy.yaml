@@ -1,0 +1,21 @@
+# Use together with compose.yaml when this host has no existing HTTPS proxy:
+# docker compose -f compose.yaml -f compose.caddy.yaml up -d
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      ntfy:
+        condition: service_healthy
+
+volumes:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,33 @@
+services:
+  ntfy:
+    image: utoptop/ntfy:main
+    restart: unless-stopped
+    command: serve
+    environment:
+      NTFY_BASE_URL: https://ntfy.aosn.de
+      # UnifiedPush endpoints are random capability URLs. Other topics are closed.
+      NTFY_AUTH_DEFAULT_ACCESS: deny-all
+      NTFY_AUTH_ACCESS: '[{"user":"*","topic":"up*","permission":"read-write"}]'
+      NTFY_CACHE_DURATION: 24h
+      NTFY_WORKER_THREADS: 2
+      NTFY_VISITOR_REQUEST_LIMIT_BURST: 120
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ntfy-data:/var/lib/ntfy
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+volumes:
+  ntfy-data:
