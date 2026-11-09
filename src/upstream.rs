@@ -51,12 +51,17 @@ impl Upstream {
                         tasks.spawn(async move {
                             let result=async {
                                 let mut response=client.post(url).header("X-Poll-ID",&message.message.id).body("").send().await?.error_for_status()?;
+                                let status=response.status();
                                 // Consume small replies to reuse the connection, while bounding untrusted response data.
                                 let mut bytes=0;
                                 while let Some(chunk)=response.chunk().await? {bytes+=chunk.len();if bytes>65536 {break;}}
-                                Ok::<_,reqwest::Error>(())
+                                Ok::<_,reqwest::Error>(status)
                             }.await;
-                            if let Err(error)=result {tracing::warn!(%error,message_id=%message.message.id,"upstream poll request failed");}
+                            match result {
+                                Ok(status) if status.is_success() => tracing::debug!(message_id=%message.message.id,topic=%message.message.topic,%status,"upstream poll request accepted"),
+                                Ok(status) => tracing::warn!(message_id=%message.message.id,%status,"upstream poll request not accepted"),
+                                Err(error) => tracing::warn!(%error,message_id=%message.message.id,"upstream poll request failed"),
+                            }
                         });
                     }
                 }

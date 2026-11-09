@@ -1234,5 +1234,10 @@ async fn matrix_notify(State(app): State<Arc<App>>, request: Request) -> Result<
         let dedup = event_id.map(|id| token_hash(&format!("{topic}\0{id}")));
         app.store.publish(message, true, dedup).await?;
     }
+    tracing::debug!(
+        accepted_topics = delivered.len(),
+        rejected_devices = rejected.len(),
+        "Matrix push request processed"
+    );
     Ok(Json(json!({"rejected":rejected})))
 }

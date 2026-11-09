@@ -152,6 +152,26 @@ Dockerfile 使用锁定的 Cargo/npm 依赖，Web 应用在构建阶段编译，
 
 0.2.0 的本机 arm64 对照测试同时开启两版的 `auth-file` 和登录功能，采用匿名 read-write 访问（1,000 个订阅、32 并发、每轮 30,000 次 Matrix 推送、三轮中位数）：Rust **4,928 次/秒**，上游 Go 2.37.2 **2,323 次/秒**；负载后进程 RSS 为 **39.54 MiB / 125.61 MiB**。这组负载下吞吐约为 **2.12 倍**，RSS 降低 **68.5%**。两版使用相同 2 CPU / 512 MiB 限制、SQLite FULL + WAL 和 Docker volume，所有投递数量吻合、HTTP 错误为零。测试不包含密码哈希、多账号身份或外部转发，也不代表持续生产容量；原始数据、波动范围及限制见 [性能报告](docs/performance.md)。
 
+## 实时推送日志
+
+从 0.2.1 起，在挂载的配置文件中设置：
+
+```yaml
+log-level: debug
+```
+
+更新镜像并重启，然后实时查看日志（服务名为 `ntfy`）：
+
+```sh
+docker compose pull ntfy
+docker compose up -d --force-recreate ntfy
+docker compose logs -f --tail=100 ntfy
+```
+
+成功发布时输出 `message published`，包含 `message_id`、`topic`、`event`、`cached` 和 `subscribers`。常规通知、Matrix/UnifiedPush 和到期发布的延迟消息都经过该日志点；缓存消息在数据库提交后记录，重复 Matrix 事件不会重复记录为新发布。Matrix 请求另外输出 `Matrix push request processed`，列出接受的主题数和拒绝的设备数。iOS 上游接受请求时输出 `upstream poll request accepted`。
+
+这些成功日志记录服务端发布或上游接受请求；手机实际收到通知仍需客户端确认。`subscribers=0` 表示发布时没有在线实时订阅者，`cached=true` 时消息已经缓存，客户端可按缓存规则补取。日志不包含通知正文或鉴权凭据。默认 `info` 不输出逐条成功日志；若配置了 `RUST_LOG`，它会优先于 `log-level`。
+
 ## 来源与许可
 
 Rust 服务端为本仓库实现，Web 应用来自 [binwiederhier/ntfy](https://github.com/binwiederhier/ntfy)，上游快照见 [NOTICE](NOTICE)。按 Apache-2.0 发布。协议依据 [ntfy API](https://docs.ntfy.sh/subscribe/api/) 和 [Matrix Push Gateway API](https://spec.matrix.org/latest/push-gateway-api/)。

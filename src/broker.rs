@@ -107,9 +107,22 @@ impl Broker {
         if let Some(upstream) = &self.upstream {
             upstream.publish(message.clone());
         }
-        if let Some(sender) = self.topics.read().unwrap().get(&message.message.topic) {
-            let _ = sender.send(message);
-        }
+        let subscribers = self
+            .topics
+            .read()
+            .unwrap()
+            .get(&message.message.topic)
+            .map_or(0, |sender| sender.send(message.clone()).unwrap_or(0));
+        // Cached messages reach this point only after their transaction commits.
+        // This is publication to the server's broadcast queue, not a device ACK.
+        tracing::debug!(
+            message_id = %message.message.id,
+            topic = %message.message.topic,
+            event = %message.message.event,
+            cached = message.cached,
+            subscribers,
+            "message published"
+        );
     }
     pub fn connections(&self) -> usize {
         self.config.subscription_limit - self.slots.available_permits()
